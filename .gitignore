@@ -1,0 +1,24 @@
+# Dependencias
+node_modules/
+
+# Build / salida
+dist/
+build/
+web-build/
+
+# Entorno / secretos — nunca versionar
+.env
+.env.local
+.env.*.local
+
+# Expo
+.expo/
+.expo-shared/
+
+# Logs y temporales
+*.log
+npm-debug.log*
+
+# SO / editor
+.DS_Store
+Thumbs.db

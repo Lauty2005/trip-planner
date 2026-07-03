@@ -1,0 +1,91 @@
+erDiagram
+    USERS ||--o{ TRIPS : "owns"
+    USERS ||--o{ TRIP_COLLABORATORS : "participates in"
+    TRIPS ||--o{ TRIP_COLLABORATORS : "shared with"
+    TRIPS ||--o{ ITINERARY_DAYS : "has"
+    ITINERARY_DAYS ||--o{ ACTIVITIES : "contains"
+    TRIPS ||--o{ BUDGET_CATEGORIES : "defines"
+    TRIPS ||--o{ EXPENSES : "logs"
+    BUDGET_CATEGORIES ||--o{ EXPENSES : "classifies"
+    USERS ||--o{ EXPENSES : "pays"
+    TRIPS ||--o{ HOTELS : "books"
+    TRIPS ||--o{ FLIGHTS : "books"
+    TRIPS ||--o{ SAVED_PLACES : "pins on map"
+
+    USERS {
+        uuid id PK
+        varchar email
+        varchar password_hash
+        varchar name
+    }
+    TRIPS {
+        uuid id PK
+        uuid owner_id FK
+        varchar title
+        varchar destination
+        date start_date
+        date end_date
+        varchar status
+    }
+    TRIP_COLLABORATORS {
+        uuid id PK
+        uuid trip_id FK
+        uuid user_id FK
+        varchar role
+    }
+    ITINERARY_DAYS {
+        uuid id PK
+        uuid trip_id FK
+        date day_date
+        int day_number
+    }
+    ACTIVITIES {
+        uuid id PK
+        uuid itinerary_day_id FK
+        varchar title
+        varchar category
+        double lat
+        double lng
+        time start_time
+    }
+    BUDGET_CATEGORIES {
+        uuid id PK
+        uuid trip_id FK
+        varchar name
+        numeric planned_amount
+    }
+    EXPENSES {
+        uuid id PK
+        uuid trip_id FK
+        uuid budget_category_id FK
+        uuid paid_by_user_id FK
+        numeric amount
+        date expense_date
+    }
+    HOTELS {
+        uuid id PK
+        uuid trip_id FK
+        varchar name
+        double lat
+        double lng
+        date check_in_date
+        date check_out_date
+        varchar status
+    }
+    FLIGHTS {
+        uuid id PK
+        uuid trip_id FK
+        varchar airline
+        varchar flight_number
+        timestamptz departure_datetime
+        varchar leg_type
+        boolean has_layover
+        varchar status
+    }
+    SAVED_PLACES {
+        uuid id PK
+        uuid trip_id FK
+        varchar name
+        double lat
+        double lng
+    }

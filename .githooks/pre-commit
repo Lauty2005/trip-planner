@@ -1,0 +1,14 @@
+#!/bin/sh
+# Pre-commit hook — versionado en .githooks/ (activar con:
+#   git config core.hooksPath .githooks).
+# Corre el typecheck del backend y aborta el commit si tsc encuentra errores.
+# El proyecto se ejecuta con tsx (sin chequeo de tipos), así que este hook es
+# la red que evita que dist/ vuelva a quedar en rojo.
+
+set -e
+
+echo "pre-commit: typecheck del backend (trip-planner-api)..."
+cd "$(dirname "$0")/../trip-planner-api"
+npm run typecheck
+
+echo "pre-commit: OK"

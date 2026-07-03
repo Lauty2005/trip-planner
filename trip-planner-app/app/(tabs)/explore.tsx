@@ -1,0 +1,764 @@
+import { useEffect, useState } from 'react';
+import { View, Text, TextInput, Pressable, ScrollView, StyleSheet } from 'react-native';
+import { router } from 'expo-router';
+import { createHotel, createFlight, estimateFlightArrival, type FlightLegType, type FlightEstimate } from '@/api/trips';
+import { useSelectedTripStore } from '@/store/selectedTrip';
+import { DatePickerField } from '@/components/DatePickerField';
+import { SelectField } from '@/components/SelectField';
+import { TimePickerField } from '@/components/TimePickerField';
+import { PriceField } from '@/components/PriceField';
+import { CURRENCIES } from '@/data/currencies';
+import { AIRLINES } from '@/data/airlines';
+import { colors, spacing, radius, cardShadow, fonts, tracking, layout } from '@/theme';
+
+const AIRLINE_OPTIONS = AIRLINES.map((name) => ({ value: name, label: name }));
+
+// Reservas — antes esta pantalla ("Explorar") buscaba hoteles/vuelos reales
+// contra Amadeus. Se dejó de lado (2026-07-01, a pedido de Lautaro)
+// mientras trip-planner-api/.env no tenga AMADEUS_CLIENT_ID/SECRET reales
+// (ver CONTEXT.md) — sin eso, tanto la búsqueda como el autocompletado de
+// ciudad tiraban 401. En su lugar: carga manual de hotel/vuelo (nombre,
+// fechas, precio) contra los MISMOS endpoints que ya usaba el guardado de
+// resultados de Amadeus (createHotel/createFlight en src/api/trips.ts,
+// bookingSource: 'manual' en vez de 'amadeus') — nada del backend cambió,
+// solo se dejó de pasar por el proxy de búsqueda.
+//
+// Vuelos con tramo Ida/Vuelta/Interno + escala + llegada auto-estimada
+// (2026-07-02, a pedido de Lautaro): ver services/flightEstimate.ts en el
+// backend para el disclaimer completo sobre qué tan aproximada es la
+// estimación de llegada.
+
+type Mode = 'hotels' | 'flights';
+
+const LEG_TYPE_OPTIONS: { value: FlightLegType; label: string }[] = [
+  { value: 'departure', label: 'Ida' },
+  { value: 'return', label: 'Vuelta' },
+  { value: 'one_way', label: 'Vuelo interno' },
+];
+const LEG_TYPE_LABEL: Record<FlightLegType, string> = { departure: 'Ida', return: 'Vuelta', one_way: 'Vuelo' };
+
+function todayISO(): string {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+// Combina fecha (AAAA-MM-DD) + hora (HH:MM) en el mismo formato de string
+// que ya mandaba el flujo de Amadeus como departureDatetime/arrivalDatetime
+// (sin offset de timezone) — el backend los guarda tal cual en columnas
+// TIMESTAMPTZ.
+function toDatetime(date: string, time: string): string {
+  const t = /^\d{1,2}:\d{2}$/.test(time.trim()) ? time.trim().padStart(5, '0') : '00:00';
+  return `${date}T${t}:00`;
+}
+
+function formatEstimatedArrival(datetime: string): string {
+  const [date, time] = datetime.split('T');
+  const [y, m, d] = date.split('-');
+  return `${(time ?? '00:00:00').slice(0, 5)} · ${d}/${m}`;
+}
+
+function minutesToHM(mins: number): string {
+  const h = Math.floor(mins / 60);
+  const m = mins % 60;
+  return h > 0 ? `${h}h ${m}min` : `${m}min`;
+}
+
+export default function ExploreScreen() {
+  const [mode, setMode] = useState<Mode>('hotels');
+  const selectedTrip = useSelectedTripStore((state) => state.selectedTrip);
+
+  // Hotel
+  const [hotelName, setHotelName] = useState('');
+  const [hotelAddress, setHotelAddress] = useState('');
+  const [checkIn, setCheckIn] = useState('');
+  const [checkOut, setCheckOut] = useState('');
+  const [hotelPrice, setHotelPrice] = useState<number | undefined>(undefined);
+  const [hotelCurrency, setHotelCurrency] = useState('');
+  const [hotelNotes, setHotelNotes] = useState('');
+
+  // Vuelo
+  const [legType, setLegType] = useState<FlightLegType>('one_way');
+  const [airline, setAirline] = useState('');
+  const [flightNumber, setFlightNumber] = useState('');
+  const [departureAirport, setDepartureAirport] = useState('');
+  const [arrivalAirport, setArrivalAirport] = useState('');
+  const [departDate, setDepartDate] = useState('');
+  const [departTime, setDepartTime] = useState('');
+  const [arriveDate, setArriveDate] = useState('');
+  const [arriveTime, setArriveTime] = useState('');
+  // Por default, para CUALQUIER tipo de vuelo (Ida/Vuelta/Interno) la
+  // llegada se auto-estima (ver useEffect más abajo); este flag deja
+  // ingresarla a mano si el usuario tiene el horario real o si la
+  // estimación falló.
+  const [manualArrival, setManualArrival] = useState(false);
+  const [estimating, setEstimating] = useState(false);
+  const [estimatedArrival, setEstimatedArrival] = useState<FlightEstimate | null>(null);
+  const [estimateError, setEstimateError] = useState<string | null>(null);
+  // Escala: un solo stopover informativo (aeropuerto + tiempo de espera).
+  const [hasLayover, setHasLayover] = useState(false);
+  const [layoverAirport, setLayoverAirport] = useState('');
+  const [layoverHours, setLayoverHours] = useState('');
+  const [layoverMinutes, setLayoverMinutes] = useState('');
+  const [flightPrice, setFlightPrice] = useState<number | undefined>(undefined);
+  const [flightCurrency, setFlightCurrency] = useState('');
+  const [flightNotes, setFlightNotes] = useState('');
+
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [savedLabel, setSavedLabel] = useState<string | null>(null);
+
+  // Minutos de espera de la escala (0 si "Con escala" está desmarcado) —
+  // se suman a la duración estimada tanto acá como en el botón "Calcular
+  // automáticamente".
+  function getLayoverMinutesTotal(): number {
+    if (!hasLayover) return 0;
+    return Number(layoverHours || '0') * 60 + Number(layoverMinutes || '0');
+  }
+
+  // En cuanto hay origen+destino+fecha+hora de salida, pedimos la llegada
+  // estimada solos — para Ida, Vuelta e Interno por igual (debounce 600ms
+  // para no pegarle a Google/Nominatim en cada tecla). Si el usuario activó
+  // "ingresar a mano" (manualArrival) esto no corre. Si hay escala cargada,
+  // ese tiempo de espera se suma a la estimación.
+  useEffect(() => {
+    if (manualArrival) return;
+    if (!departureAirport.trim() || !arrivalAirport.trim() || !departDate || !departTime) {
+      setEstimatedArrival(null);
+      setEstimateError(null);
+      return;
+    }
+    let cancelled = false;
+    setEstimating(true);
+    setEstimateError(null);
+    const departureDatetime = toDatetime(departDate, departTime);
+    const layoverMins = getLayoverMinutesTotal();
+    const timer = setTimeout(async () => {
+      const result = await estimateFlightArrival(
+        departureAirport.trim().toUpperCase(),
+        arrivalAirport.trim().toUpperCase(),
+        departureDatetime,
+        layoverMins
+      );
+      if (cancelled) return;
+      setEstimating(false);
+      if (result) {
+        setEstimatedArrival(result);
+        setEstimateError(null);
+      } else {
+        setEstimatedArrival(null);
+        setEstimateError('No pudimos estimar la llegada automáticamente.');
+      }
+    }, 600);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [legType, manualArrival, departureAirport, arrivalAirport, departDate, departTime, hasLayover, layoverHours, layoverMinutes]);
+
+  function resetHotelForm() {
+    setHotelName('');
+    setHotelAddress('');
+    setCheckIn('');
+    setCheckOut('');
+    setHotelPrice(undefined);
+    setHotelCurrency('');
+    setHotelNotes('');
+  }
+
+  function resetFlightForm() {
+    setLegType('one_way');
+    setAirline('');
+    setFlightNumber('');
+    setDepartureAirport('');
+    setArrivalAirport('');
+    setDepartDate('');
+    setDepartTime('');
+    setArriveDate('');
+    setArriveTime('');
+    setManualArrival(false);
+    setEstimatedArrival(null);
+    setEstimateError(null);
+    setHasLayover(false);
+    setLayoverAirport('');
+    setLayoverHours('');
+    setLayoverMinutes('');
+    setFlightPrice(undefined);
+    setFlightCurrency('');
+    setFlightNotes('');
+  }
+
+  function handleSwapAirports() {
+    setDepartureAirport(arrivalAirport);
+    setArrivalAirport(departureAirport);
+  }
+
+  // Botón "Calcular automáticamente" para Ida/Vuelta (donde la llegada es
+  // un campo normal, no auto-estimada en segundo plano) — llena
+  // arriveDate/arriveTime con el resultado, que el usuario puede seguir
+  // editando si sabe el horario real.
+  async function handleEstimateArrivalClick() {
+    if (!departureAirport.trim() || !arrivalAirport.trim() || !departDate || !departTime) {
+      setEstimateError('Completá origen, destino, fecha y hora de salida primero.');
+      return;
+    }
+    setEstimating(true);
+    setEstimateError(null);
+    const departureDatetime = toDatetime(departDate, departTime);
+    const result = await estimateFlightArrival(
+      departureAirport.trim().toUpperCase(),
+      arrivalAirport.trim().toUpperCase(),
+      departureDatetime,
+      getLayoverMinutesTotal()
+    );
+    setEstimating(false);
+    if (result) {
+      const [d, t] = result.arrivalDatetime.split('T');
+      setArriveDate(d);
+      setArriveTime(t.slice(0, 5));
+    } else {
+      setEstimateError('No pudimos estimar la llegada — completala a mano.');
+    }
+  }
+
+  async function handleSaveHotel() {
+    if (!selectedTrip) return;
+    if (!hotelName.trim() || !checkIn || !checkOut) {
+      setError('Completá nombre del hotel y las dos fechas.');
+      return;
+    }
+    if (checkOut <= checkIn) {
+      setError('El check-out tiene que ser posterior al check-in.');
+      return;
+    }
+    setError(null);
+    setSaving(true);
+    try {
+      await createHotel(selectedTrip.id, {
+        name: hotelName.trim(),
+        address: hotelAddress.trim() || undefined,
+        checkInDate: checkIn,
+        checkOutDate: checkOut,
+        price: hotelPrice,
+        currency: hotelCurrency || selectedTrip.currency,
+        notes: hotelNotes.trim() || undefined,
+      });
+      setSavedLabel(hotelName.trim());
+      resetHotelForm();
+    } catch (err: any) {
+      setError(err?.response?.data?.error?.message ?? 'No se pudo guardar el hotel.');
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleSaveFlight() {
+    if (!selectedTrip) return;
+    if (!departDate || !departTime) {
+      setError('Completá fecha y hora de salida.');
+      return;
+    }
+    const departureDatetime = toDatetime(departDate, departTime);
+
+    let arrivalDatetime: string;
+    if (manualArrival) {
+      if (!arriveDate || !arriveTime) {
+        setError('Completá fecha y hora de llegada (o calculala automáticamente).');
+        return;
+      }
+      arrivalDatetime = toDatetime(arriveDate, arriveTime);
+    } else {
+      if (!estimatedArrival) {
+        setError('Todavía no se pudo calcular la llegada — completá origen/destino o ingresala a mano.');
+        return;
+      }
+      arrivalDatetime = estimatedArrival.arrivalDatetime;
+    }
+
+    if (arrivalDatetime <= departureDatetime) {
+      setError('La llegada tiene que ser posterior a la salida.');
+      return;
+    }
+
+    if (hasLayover && !layoverAirport.trim()) {
+      setError('Completá el aeropuerto de la escala (o desmarcá "Con escala").');
+      return;
+    }
+
+    setError(null);
+    setSaving(true);
+    try {
+      const layoverDurationMinutes = hasLayover
+        ? Number(layoverHours || '0') * 60 + Number(layoverMinutes || '0')
+        : undefined;
+      await createFlight(selectedTrip.id, {
+        airline: airline.trim() || undefined,
+        flightNumber: flightNumber.trim() || undefined,
+        departureAirport: departureAirport.trim().toUpperCase() || undefined,
+        arrivalAirport: arrivalAirport.trim().toUpperCase() || undefined,
+        departureDatetime,
+        arrivalDatetime,
+        price: flightPrice,
+        currency: flightCurrency || selectedTrip.currency,
+        notes: flightNotes.trim() || undefined,
+        legType,
+        hasLayover,
+        layoverAirport: hasLayover ? layoverAirport.trim().toUpperCase() : undefined,
+        layoverDurationMinutes: hasLayover && layoverDurationMinutes ? layoverDurationMinutes : undefined,
+      });
+      setSavedLabel(
+        `${LEG_TYPE_LABEL[legType]}${
+          departureAirport && arrivalAirport ? `: ${departureAirport.toUpperCase()} → ${arrivalAirport.toUpperCase()}` : ''
+        }`
+      );
+      resetFlightForm();
+    } catch (err: any) {
+      setError(err?.response?.data?.error?.message ?? 'No se pudo guardar el vuelo.');
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  function handleModeChange(next: Mode) {
+    setMode(next);
+    setError(null);
+    setSavedLabel(null);
+  }
+
+  const showArrivalFields = manualArrival;
+
+  return (
+    <ScrollView style={styles.root} contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
+      {/* Título */}
+      <View style={styles.titleBlock}>
+        <Text style={styles.eyebrow}>RESERVAS</Text>
+        <Text style={styles.title}>Cargá lo que ya tenés</Text>
+        <Text style={styles.subtitle}>
+          La búsqueda automática está en pausa por ahora — cargá el hotel o el vuelo a mano y quedan guardados en tu
+          viaje igual.
+        </Text>
+      </View>
+
+      {!selectedTrip ? (
+        <Pressable style={styles.tripHint} onPress={() => router.push('/(tabs)/trips')}>
+          <Text style={styles.tripHintText}>Elegí un viaje en "Mis viajes" para poder guardar acá →</Text>
+        </Pressable>
+      ) : (
+        <Text style={styles.tripActive}>
+          Guardando en <Text style={styles.tripActiveBold}>{selectedTrip.title}</Text>
+        </Text>
+      )}
+
+      {/* Toggle Vuelos / Hoteles */}
+      <View style={styles.toggle}>
+        <Pressable
+          style={[styles.toggleOption, mode === 'flights' && styles.toggleOptionActive]}
+          onPress={() => handleModeChange('flights')}
+        >
+          <Text style={[styles.toggleText, mode === 'flights' && styles.toggleTextActive]}>Vuelos</Text>
+        </Pressable>
+        <Pressable
+          style={[styles.toggleOption, mode === 'hotels' && styles.toggleOptionActive]}
+          onPress={() => handleModeChange('hotels')}
+        >
+          <Text style={[styles.toggleText, mode === 'hotels' && styles.toggleTextActive]}>Hoteles</Text>
+        </Pressable>
+      </View>
+
+      {/* Formulario */}
+      <View style={styles.form}>
+        {mode === 'hotels' ? (
+          <>
+            <Field glyph="🏨" label="Nombre del hotel" placeholder="Ej: Hotel Central" value={hotelName} onChangeText={setHotelName} />
+            <Field glyph="📍" label="Dirección (opcional)" placeholder="Calle y número, ciudad" value={hotelAddress} onChangeText={setHotelAddress} />
+            <View style={styles.fieldRow}>
+              <View style={styles.fieldRowItem}>
+                <DatePickerField glyph="🗓️" label="Check-in" placeholder="Elegí una fecha" value={checkIn} onChange={setCheckIn} minDate={todayISO()} />
+              </View>
+              <View style={styles.fieldRowItem}>
+                <DatePickerField
+                  glyph="🗓️"
+                  label="Check-out"
+                  placeholder="Elegí una fecha"
+                  value={checkOut}
+                  onChange={setCheckOut}
+                  minDate={checkIn || todayISO()}
+                />
+              </View>
+            </View>
+            <View style={styles.fieldRow}>
+              <View style={styles.fieldRowItem}>
+                <PriceField glyph="💲" label="Precio total (opcional)" value={hotelPrice} onChange={setHotelPrice} />
+              </View>
+              <View style={styles.fieldRowItem}>
+                <SelectField
+                  glyph="💱"
+                  label="Moneda"
+                  placeholder={selectedTrip?.currency ?? 'Elegí una moneda'}
+                  value={hotelCurrency}
+                  onChange={setHotelCurrency}
+                  options={CURRENCIES}
+                />
+              </View>
+            </View>
+            <Field glyph="📝" label="Notas (opcional)" placeholder="Ej: reserva a nombre de..." value={hotelNotes} onChangeText={setHotelNotes} />
+
+            {error ? <Text style={styles.error}>{error}</Text> : null}
+
+            <Pressable
+              style={[styles.saveButton, (!selectedTrip || saving) && styles.saveButtonDisabled]}
+              onPress={handleSaveHotel}
+              disabled={!selectedTrip || saving}
+            >
+              <Text style={styles.saveButtonText}>{saving ? 'Guardando...' : '＋ Guardar hotel'}</Text>
+            </Pressable>
+          </>
+        ) : (
+          <>
+            <Text style={styles.fieldLabel}>TIPO DE VUELO</Text>
+            <View style={styles.legTypeRow}>
+              {LEG_TYPE_OPTIONS.map((opt) => (
+                <Pressable
+                  key={opt.value}
+                  style={[styles.legTypeChip, legType === opt.value && styles.legTypeChipActive]}
+                  onPress={() => setLegType(opt.value)}
+                >
+                  <Text style={[styles.legTypeChipText, legType === opt.value && styles.legTypeChipTextActive]}>
+                    {opt.label}
+                  </Text>
+                </Pressable>
+              ))}
+            </View>
+            <Text style={styles.hint}>Con origen, destino, fecha y hora de salida, la llegada se calcula sola. Podés ingresarla a mano si preferís.</Text>
+
+            <View style={styles.fieldRow}>
+              <View style={styles.fieldRowItem}>
+                <Field glyph="🛫" label="Origen (opcional)" placeholder="Ej: EZE" value={departureAirport} onChangeText={setDepartureAirport} autoCapitalize="characters" maxLength={10} />
+              </View>
+              <Pressable style={styles.swapButton} onPress={handleSwapAirports} hitSlop={8}>
+                <Text style={styles.swapButtonText}>⇄</Text>
+              </Pressable>
+              <View style={styles.fieldRowItem}>
+                <Field glyph="🛬" label="Destino (opcional)" placeholder="Ej: MIA" value={arrivalAirport} onChangeText={setArrivalAirport} autoCapitalize="characters" maxLength={10} />
+              </View>
+            </View>
+
+            <View style={styles.fieldRow}>
+              <View style={styles.fieldRowItem}>
+                <DatePickerField glyph="🗓️" label="Fecha de salida" placeholder="Elegí una fecha" value={departDate} onChange={setDepartDate} minDate={todayISO()} />
+              </View>
+              <View style={styles.fieldRowItem}>
+                <TimePickerField glyph="🕐" label="Hora de salida" value={departTime} onChange={setDepartTime} />
+              </View>
+            </View>
+
+            {/* Escala arriba de la llegada: el tiempo de espera acá cargado
+                se suma a la estimación automática de más abajo. */}
+            <Pressable style={styles.checkboxRow} onPress={() => setHasLayover(!hasLayover)}>
+              <View style={[styles.checkbox, hasLayover && styles.checkboxChecked]}>
+                {hasLayover ? <Text style={styles.checkboxMark}>✓</Text> : null}
+              </View>
+              <Text style={styles.checkboxLabel}>Con escala</Text>
+            </Pressable>
+            {hasLayover ? (
+              <>
+                <Field
+                  glyph="🔀"
+                  label="Aeropuerto de la escala"
+                  placeholder="Ej: BOG"
+                  value={layoverAirport}
+                  onChangeText={setLayoverAirport}
+                  autoCapitalize="characters"
+                  maxLength={10}
+                />
+                <View style={styles.fieldRow}>
+                  <View style={styles.fieldRowItem}>
+                    <Field glyph="⏱️" label="Espera (horas)" placeholder="0" value={layoverHours} onChangeText={setLayoverHours} keyboardType="numeric" />
+                  </View>
+                  <View style={styles.fieldRowItem}>
+                    <Field glyph="⏱️" label="Espera (minutos)" placeholder="0" value={layoverMinutes} onChangeText={setLayoverMinutes} keyboardType="numeric" />
+                  </View>
+                </View>
+              </>
+            ) : null}
+
+            {showArrivalFields ? (
+              <>
+                <View style={styles.fieldRow}>
+                  <View style={styles.fieldRowItem}>
+                    <DatePickerField
+                      glyph="🗓️"
+                      label="Fecha de llegada"
+                      placeholder="Elegí una fecha"
+                      value={arriveDate}
+                      onChange={setArriveDate}
+                      minDate={departDate || todayISO()}
+                    />
+                  </View>
+                  <View style={styles.fieldRowItem}>
+                    <TimePickerField glyph="🕐" label="Hora de llegada" value={arriveTime} onChange={setArriveTime} />
+                  </View>
+                </View>
+                <View style={styles.estimateActions}>
+                  <Pressable onPress={handleEstimateArrivalClick} disabled={estimating}>
+                    <Text style={styles.estimateLink}>{estimating ? 'Calculando...' : '✨ Calcular automáticamente'}</Text>
+                  </Pressable>
+                  {manualArrival ? (
+                    <Pressable onPress={() => setManualArrival(false)}>
+                      <Text style={styles.estimateLinkMuted}>Volver a la estimación automática</Text>
+                    </Pressable>
+                  ) : null}
+                </View>
+                {estimateError ? <Text style={styles.estimateError}>{estimateError}</Text> : null}
+              </>
+            ) : (
+              <View style={styles.estimateBox}>
+                {estimating ? (
+                  <Text style={styles.estimateText}>Calculando llegada estimada...</Text>
+                ) : estimatedArrival ? (
+                  <>
+                    <Text style={styles.estimateText}>
+                      🛬 Llegada estimada: {formatEstimatedArrival(estimatedArrival.arrivalDatetime)} ·{' '}
+                      {minutesToHM(estimatedArrival.estimatedDurationMinutes)} en total
+                      {hasLayover ? ' (incluye la escala)' : ''}
+                    </Text>
+                    <Text style={styles.estimateHint}>Estimación por distancia entre aeropuertos, no el horario real del vuelo.</Text>
+                  </>
+                ) : estimateError ? (
+                  <Text style={styles.estimateError}>{estimateError}</Text>
+                ) : (
+                  <Text style={styles.estimateHint}>Completá origen, destino, fecha y hora de salida para calcular la llegada.</Text>
+                )}
+                <Pressable onPress={() => setManualArrival(true)}>
+                  <Text style={styles.estimateLink}>Ingresar llegada manualmente</Text>
+                </Pressable>
+              </View>
+            )}
+
+            <View style={styles.fieldRow}>
+              <View style={styles.fieldRowItem}>
+                <SelectField
+                  glyph="✈️"
+                  label="Aerolínea (opcional)"
+                  placeholder="Elegí una aerolínea"
+                  value={airline}
+                  onChange={setAirline}
+                  options={AIRLINE_OPTIONS}
+                  searchable
+                />
+              </View>
+              <View style={styles.fieldRowItem}>
+                <Field glyph="#️⃣" label="N° de vuelo (opcional)" placeholder="Ej: AR1234" value={flightNumber} onChangeText={setFlightNumber} autoCapitalize="characters" />
+              </View>
+            </View>
+
+            <View style={styles.fieldRow}>
+              <View style={styles.fieldRowItem}>
+                <PriceField glyph="💲" label="Precio (opcional)" value={flightPrice} onChange={setFlightPrice} />
+              </View>
+              <View style={styles.fieldRowItem}>
+                <SelectField
+                  glyph="💱"
+                  label="Moneda"
+                  placeholder={selectedTrip?.currency ?? 'Elegí una moneda'}
+                  value={flightCurrency}
+                  onChange={setFlightCurrency}
+                  options={CURRENCIES}
+                />
+              </View>
+            </View>
+            <Field glyph="📝" label="Notas (opcional)" placeholder="Ej: check-in online pendiente" value={flightNotes} onChangeText={setFlightNotes} />
+
+            {error ? <Text style={styles.error}>{error}</Text> : null}
+
+            <Pressable
+              style={[styles.saveButton, (!selectedTrip || saving) && styles.saveButtonDisabled]}
+              onPress={handleSaveFlight}
+              disabled={!selectedTrip || saving}
+            >
+              <Text style={styles.saveButtonText}>{saving ? 'Guardando...' : '＋ Guardar vuelo'}</Text>
+            </Pressable>
+          </>
+        )}
+      </View>
+
+      {savedLabel ? (
+        <View style={styles.savedBanner}>
+          <Text style={styles.savedBannerText}>
+            ✓ Guardado {mode === 'hotels' ? 'el hotel' : savedLabel} en {selectedTrip?.title}.
+          </Text>
+          {selectedTrip ? (
+            <Pressable onPress={() => router.push(`/trip/${selectedTrip.id}`)}>
+              <Text style={styles.savedBannerLink}>Ver en el dossier del viaje →</Text>
+            </Pressable>
+          ) : null}
+        </View>
+      ) : null}
+    </ScrollView>
+  );
+}
+
+function Field({
+  glyph,
+  label,
+  ...inputProps
+}: { glyph: string; label: string } & React.ComponentProps<typeof TextInput>) {
+  return (
+    <View>
+      <Text style={styles.fieldLabel}>{label.toUpperCase()}</Text>
+      <View style={styles.fieldBox}>
+        <Text style={styles.fieldGlyph}>{glyph}</Text>
+        <TextInput
+          style={styles.fieldInput}
+          placeholderTextColor={colors.muted}
+          autoCorrect={false}
+          {...inputProps}
+        />
+      </View>
+    </View>
+  );
+}
+
+const styles = StyleSheet.create({
+  root: { flex: 1, backgroundColor: colors.background },
+  content: {
+    padding: spacing.containerPadding,
+    paddingBottom: 40,
+    gap: spacing.stackLg,
+    width: '100%',
+    maxWidth: layout.maxWidth,
+    alignSelf: 'center',
+  },
+
+  titleBlock: { gap: 4 },
+  eyebrow: { fontFamily: fonts.mono, fontSize: 11.5, letterSpacing: tracking.eyebrow, textTransform: 'uppercase', color: colors.muted },
+  title: { fontFamily: fonts.displaySemibold, fontSize: 26, fontWeight: '700', color: colors.ink, letterSpacing: -0.5, marginTop: 2 },
+  subtitle: { fontSize: 15, color: colors.inkSoft },
+
+  tripHint: {
+    borderWidth: 1,
+    borderColor: colors.line,
+    borderRadius: radius.sm,
+    padding: spacing.stackMd,
+    backgroundColor: colors.surface,
+  },
+  tripHintText: { color: colors.stamp, fontSize: 13.5, fontWeight: '600' },
+  tripActive: { fontSize: 13.5, color: colors.inkSoft },
+  tripActiveBold: { fontWeight: '700', color: colors.ink },
+
+  // Toggle
+  toggle: {
+    flexDirection: 'row',
+    backgroundColor: colors.paper2,
+    borderRadius: radius.xl,
+    padding: 4,
+  },
+  toggleOption: { flex: 1, paddingVertical: 8, borderRadius: radius.lg, alignItems: 'center' },
+  toggleOptionActive: { backgroundColor: colors.ink },
+  toggleText: { fontFamily: fonts.displaySemibold, fontSize: 15, fontWeight: '600', color: colors.inkSoft },
+  toggleTextActive: { color: colors.white },
+
+  // Tipo de vuelo (Ida / Vuelta / Vuelo interno)
+  legTypeRow: { flexDirection: 'row', gap: 8 },
+  legTypeChip: {
+    flex: 1,
+    alignItems: 'center',
+    paddingVertical: 9,
+    borderRadius: radius.lg,
+    borderWidth: 1,
+    borderColor: colors.line,
+    backgroundColor: colors.surface,
+  },
+  legTypeChipActive: { backgroundColor: colors.ink, borderColor: colors.ink },
+  legTypeChipText: { fontFamily: fonts.displaySemibold, fontSize: 13, fontWeight: '600', color: colors.inkSoft },
+  legTypeChipTextActive: { color: colors.white },
+  hint: { fontSize: 12.5, color: colors.muted, marginTop: -4 },
+
+  // Formulario
+  form: {
+    backgroundColor: colors.surface,
+    borderRadius: radius.card,
+    borderWidth: 1,
+    borderColor: colors.line,
+    padding: spacing.gutter,
+    gap: spacing.stackMd,
+    ...cardShadow,
+  },
+  fieldRow: { flexDirection: 'row', gap: spacing.stackMd, alignItems: 'flex-start' },
+  fieldRowItem: { flex: 1 },
+  fieldLabel: { fontFamily: fonts.mono, fontSize: 10.5, letterSpacing: tracking.wide, color: colors.muted, marginBottom: 4, marginLeft: 2 },
+  fieldBox: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: colors.surface,
+    borderWidth: 1,
+    borderColor: colors.line,
+    borderRadius: radius.lg,
+    paddingHorizontal: 12,
+  },
+  fieldGlyph: { fontSize: 16, marginRight: 8 },
+  fieldInput: { flex: 1, paddingVertical: 12, fontSize: 16, color: colors.ink },
+
+  // Botón "⇄" para invertir origen/destino, alineado con la altura de los
+  // dos inputs de la fila (le pusimos margin-top para que no quede pegado
+  // al label de arriba).
+  swapButton: {
+    width: 36,
+    height: 44,
+    marginTop: 18,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: radius.lg,
+    backgroundColor: colors.paper2,
+  },
+  swapButtonText: { fontSize: 16, color: colors.inkSoft },
+
+  // Estimación automática de llegada
+  estimateBox: {
+    backgroundColor: colors.paper2,
+    borderRadius: radius.lg,
+    padding: spacing.stackMd,
+    gap: 6,
+  },
+  estimateText: { fontSize: 13.5, color: colors.ink, fontWeight: '600' },
+  estimateHint: { fontSize: 11.5, color: colors.muted },
+  estimateError: { fontSize: 12.5, color: colors.stamp },
+  estimateActions: { flexDirection: 'row', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8 },
+  estimateLink: { fontFamily: fonts.mono, fontSize: 11.5, color: colors.stamp, fontWeight: '700' },
+  estimateLinkMuted: { fontFamily: fonts.mono, fontSize: 11.5, color: colors.muted },
+
+  // Checkbox "Con escala"
+  checkboxRow: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  checkbox: {
+    width: 20,
+    height: 20,
+    borderRadius: radius.sm,
+    borderWidth: 1.5,
+    borderColor: colors.line,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: colors.surface,
+  },
+  checkboxChecked: { backgroundColor: colors.ink, borderColor: colors.ink },
+  checkboxMark: { color: colors.white, fontSize: 12, fontWeight: '700' },
+  checkboxLabel: { fontSize: 14, fontWeight: '600', color: colors.ink },
+
+  error: { color: colors.stamp },
+  saveButton: {
+    backgroundColor: colors.stamp,
+    borderRadius: radius.sm,
+    paddingVertical: 14,
+    alignItems: 'center',
+    marginTop: spacing.stackSm,
+  },
+  saveButtonDisabled: { opacity: 0.5 },
+  saveButtonText: { color: colors.white, fontFamily: fonts.displaySemibold, fontSize: 15, fontWeight: '600' },
+
+  savedBanner: {
+    backgroundColor: colors.primaryFixed,
+    borderRadius: radius.card,
+    padding: spacing.gutter,
+    gap: 4,
+  },
+  savedBannerText: { color: colors.ink, fontWeight: '600' },
+  savedBannerLink: { color: colors.stamp, fontWeight: '700' },
+});
