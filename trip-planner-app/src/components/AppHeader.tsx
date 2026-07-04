@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { View, Text, Pressable, ScrollView, StyleSheet } from 'react-native';
 import { router, usePathname } from 'expo-router';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { getMe } from '@/api/auth';
 import { colors, spacing, radius, fonts, layout } from '@/theme';
 
@@ -17,6 +18,10 @@ import { colors, spacing, radius, fonts, layout } from '@/theme';
 // presupuesto/gastos vive en el dossier); /(tabs)/map se dejó como ruta
 // alcanzable por links puntuales para no romper nada existente.
 
+// 2026-07-03, a pedido de Lautaro: se sacó "Perfil" de los links de texto —
+// el avatar (círculo con la inicial, a la derecha) ya navega a /profile al
+// tocarlo, así que el link de texto quedaba redundante. Se deja el avatar
+// como ÚNICO camino a Perfil.
 const NAV_LINKS = [
   { href: '/(tabs)/trips' as const, label: 'Mis viajes' },
   // Antes decía "Explorar" (búsqueda contra Amadeus). Con esa búsqueda en
@@ -25,7 +30,6 @@ const NAV_LINKS = [
   // ruta (/(tabs)/explore) no cambió para no romper los links que ya
   // apuntan a ella (dossier de viaje, etc.).
   { href: '/(tabs)/explore' as const, label: 'Reservas' },
-  { href: '/(tabs)/profile' as const, label: 'Perfil' },
 ];
 
 // 2026-07-02, a pedido de Lautaro: botón "← Volver" en TODAS las pantallas
@@ -36,8 +40,20 @@ const NAV_LINKS = [
 // calcula solo, mirando la ruta actual, y siempre vuelve a Inicio con
 // `router.replace('/(tabs)')` — igual que tocar el logo — en vez de
 // depender del historial de navegación.
-export function AppHeader() {
+// `safeTop`: cuando expo-router dibuja este componente como `header` de un
+// Stack nativo (app/(tabs)/_layout.tsx), la propia navegación nativa ya lo
+// posiciona debajo del status bar/notch Y respeta los insets laterales
+// (cámara punch-hole descentrada, isla dinámica, etc). Pero en
+// app/trip/[tripId]/index.tsx se usa `headerShown: false` y este componente
+// se monta a mano dentro de un View plano — ahí nadie reserva ese espacio,
+// así que además de quedar tapado por la barra de estado (visto con
+// Lautaro: "Volver" pisado por el reloj), en dispositivos con la cámara
+// selfie descentrada "Perfil" y el avatar quedaban por debajo de la zona
+// física de la cámara. `safeTop` suma insets.top/left/right solo en ese
+// caso, para no tocar el caso que ya funciona bien dentro del Stack.
+export function AppHeader({ safeTop = false }: { safeTop?: boolean }) {
   const pathname = usePathname();
+  const insets = useSafeAreaInsets();
   const [initial, setInitial] = useState<string | null>(null);
   const isHome = pathname === '/' || pathname === '/(tabs)' || pathname === '';
 
@@ -61,8 +77,13 @@ export function AppHeader() {
     // que el contenido de cada pantalla — así en pantallas anchas el
     // header queda alineado con el contenido de abajo en vez de quedar
     // pegado a los bordes de la ventana.
-    <View style={styles.headerBg}>
-      <View style={styles.header}>
+    <View style={[styles.headerBg, safeTop && { paddingTop: insets.top }]}>
+      <View
+        style={[
+          styles.header,
+          safeTop && { paddingLeft: spacing.gutter + insets.left, paddingRight: spacing.gutter + insets.right },
+        ]}
+      >
         {isHome ? null : (
           <Pressable hitSlop={10} style={styles.backButton} onPress={() => router.replace('/(tabs)')}>
             <Text style={styles.backButtonText}>← Volver</Text>

@@ -16,6 +16,8 @@ import { getBudgetSummary, type BudgetSummary } from '@/api/budget';
 import { useSelectedTripStore } from '@/store/selectedTrip';
 import type { Trip, ItineraryDay } from '@/types';
 import { colors, spacing, radius, cardShadow, fonts, tracking, layout } from '@/theme';
+import { formatShort } from '@/utils/date';
+import { AppHeader } from '@/components/AppHeader';
 
 // Panel de Control — rediseño "Rumbo" (dossier de viaje editorial: papel +
 // tinta navy + sello naranja), adaptado del boceto index.html que pasó
@@ -47,11 +49,6 @@ function daysUntil(isoDate: string): number {
   const target = new Date(isoDate);
   target.setHours(0, 0, 0, 0);
   return Math.round((target.getTime() - today.getTime()) / 86_400_000);
-}
-
-function formatShort(iso: string): string {
-  const d = new Date(iso);
-  return d.toLocaleDateString('es-AR', { day: '2-digit', month: 'short' }).replace('.', '').toUpperCase();
 }
 
 function nightsBetween(start: string, end: string): number {
@@ -179,10 +176,10 @@ export default function DashboardScreen() {
 
   return (
     <View style={styles.root}>
-      {/* El TopAppBar propio se sacó: ahora lo cubre el AppHeader
-          compartido que dibuja app/(tabs)/_layout.tsx para las 6
-          pantallas del grupo (antes esta pantalla ocultaba el header del
-          layout con headerShown:false y dibujaba el suyo). */}
+      {/* 2026-07-03: cada pantalla del grupo dibuja su propio AppHeader
+          (antes lo hacía app/(tabs)/_layout.tsx como header nativo) — ver
+          el comentario en ese archivo. */}
+      <AppHeader safeTop />
       <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
         {/* Hero: próximos viajes, tarjeta de embarque deslizable */}
         <View style={styles.section}>

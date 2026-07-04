@@ -5,6 +5,7 @@ import { getTripMapPins } from '@/api/trips';
 import { useSelectedTripStore } from '@/store/selectedTrip';
 import type { MapPin } from '@/types';
 import { colors, spacing, radius, cardShadow, fonts } from '@/theme';
+import { AppHeader } from '@/components/AppHeader';
 
 // react-native-maps es 100% nativo (no tiene build para web) — ver
 // map.tsx. Acá usamos Leaflet, pero SIN agregarlo como dependencia de npm:
@@ -166,11 +167,13 @@ export default function MapScreenWeb() {
   const showLibError = libReady === false && !!libError;
 
   return (
-    <View style={styles.container}>
-      {/* containerRef es `any` a propósito: react-native-web reenvía este ref
-          al <div> real (ver comentario arriba de loadLeaflet), no al tipo
-          `View` de react-native que espera el resto del código nativo. */}
-      <View ref={containerRef} style={styles.map} />
+    <View style={styles.pageRoot}>
+      <AppHeader safeTop />
+      <View style={styles.container}>
+        {/* containerRef es `any` a propósito: react-native-web reenvía este ref
+            al <div> real (ver comentario arriba de loadLeaflet), no al tipo
+            `View` de react-native que espera el resto del código nativo. */}
+        <View ref={containerRef} style={styles.map} />
 
       {showSpinner ? (
         <View style={styles.banner}>
@@ -199,6 +202,7 @@ export default function MapScreenWeb() {
           </Text>
         </View>
       ) : null}
+      </View>
     </View>
   );
 }
@@ -215,6 +219,7 @@ function escapeHtml(value: string): string {
 }
 
 const styles = StyleSheet.create({
+  pageRoot: { flex: 1 },
   container: { flex: 1 },
   map: { flex: 1 },
   banner: {

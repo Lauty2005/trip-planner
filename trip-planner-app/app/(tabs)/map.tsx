@@ -7,6 +7,7 @@ import { getTripMapPins } from '@/api/trips';
 import { useSelectedTripStore } from '@/store/selectedTrip';
 import type { MapPin } from '@/types';
 import { colors, spacing, radius, cardShadow, fonts } from '@/theme';
+import { AppHeader } from '@/components/AppHeader';
 
 // Mapa con los pines reales del trip activo (actividades + hoteles + lugares
 // guardados, vía /trips/:tripId/map — un solo request, sin geocoding en el
@@ -94,8 +95,10 @@ export default function MapScreen() {
   );
 
   return (
-    <View style={styles.container}>
-      <MapView style={styles.map} region={region}>
+    <View style={styles.pageRoot}>
+      <AppHeader safeTop />
+      <View style={styles.container}>
+        <MapView style={styles.map} region={region}>
         {selectedTrip
           ? pins.map((pin) => (
               <Marker
@@ -128,11 +131,13 @@ export default function MapScreen() {
           </Text>
         </View>
       ) : null}
+      </View>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
+  pageRoot: { flex: 1 },
   container: { flex: 1 },
   map: { flex: 1 },
   banner: {

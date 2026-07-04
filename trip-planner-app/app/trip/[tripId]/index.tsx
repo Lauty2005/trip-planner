@@ -45,8 +45,10 @@ import {
 // estos helpers pasaron a un módulo neutral (src/utils/budgetDisplay.ts)
 // que no depende de ninguna pantalla en particular.
 import { CATEGORY_COLORS, categoryGlyph } from '@/utils/budgetDisplay';
+import { formatShort } from '@/utils/date';
 import { useSelectedTripStore } from '@/store/selectedTrip';
-import type { Trip, ItineraryDay, Activity, ActivityCategory, TripStatus, BookingStatus, MapPin, Expense } from '@/types';
+import { useEditFlightStore } from '@/store/editFlight';
+import type { Trip, ItineraryDay, Activity, ActivityCategory, TripStatus, MapPin, Expense } from '@/types';
 import { DatePickerField } from '@/components/DatePickerField';
 import { TimePickerField } from '@/components/TimePickerField';
 import { PriceField } from '@/components/PriceField';
@@ -111,6 +113,26 @@ const CATEGORY_GLYPH: Record<ActivityCategory, string> = {
 
 const LEG_TYPE_LABEL: Record<FlightLegType, string> = { departure: 'Ida', return: 'Vuelta', one_way: 'Interno' };
 
+// Fecha de "hoy" en formato AAAA-MM-DD, hora local — usada como
+// expense_date al marcar un hotel/vuelo pendiente como pagado (representa
+// el día en que efectivamente se paga, no el check-in/salida del vuelo).
+function todayISO(): string {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+// Hotel/vuelo con precio cargado que todavía no se pasó a un gasto real
+// (tab Gastos, sección "Pendientes de pago") — ver pendingPayments más
+// abajo y source_hotel_id/source_flight_id en expenses.
+interface PendingPayment {
+  id: string;
+  type: 'hotel' | 'flight';
+  title: string;
+  price: number;
+  currency: string;
+  budgetCategoryId?: string;
+}
+
 function minutesToHM(mins: number): string {
   const h = Math.floor(mins / 60);
   const m = mins % 60;
@@ -122,12 +144,6 @@ const STATUS_LABEL: Record<TripStatus, string> = {
   confirmed: 'Confirmado',
   ongoing: 'En curso',
   completed: 'Completado',
-  cancelled: 'Cancelado',
-};
-
-const BOOKING_LABEL: Record<BookingStatus, string> = {
-  candidate: 'Candidato',
-  booked: 'Reservado',
   cancelled: 'Cancelado',
 };
 
@@ -159,6 +175,7 @@ const pct = (part: number, whole: number): number => (whole > 0 ? (part / whole)
 export default function TripDetailScreen() {
   const { tripId } = useLocalSearchParams<{ tripId: string }>();
   const setSelectedTrip = useSelectedTripStore((state) => state.setSelectedTrip);
+  const setEditFlight = useEditFlightStore((state) => state.setEditFlight);
 
   const [trip, setTrip] = useState<Trip | null>(null);
   const [days, setDays] = useState<ItineraryDay[]>([]);
@@ -210,6 +227,10 @@ export default function TripDetailScreen() {
   const [editingExpenseId, setEditingExpenseId] = useState<string | null>(null);
   const [savingExpense, setSavingExpense] = useState(false);
   const [expenseFormError, setExpenseFormError] = useState<string | null>(null);
+
+  // --- "Marcar como pagado" en un hotel/vuelo pendiente (tab Gastos) ---
+  const [markingPaidId, setMarkingPaidId] = useState<string | null>(null);
+  const [pendingPaymentError, setPendingPaymentError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -333,6 +354,15 @@ export default function TripDetailScreen() {
     router.push('/(tabs)/explore');
   }
 
+  // Botón "Editar" en la tab Vuelos (2026-07-04, a pedido de Lautaro) —
+  // reusa el mismo form de Reservas: deja el vuelo en useEditFlightStore
+  // para que explore.tsx lo precargue apenas monta.
+  function handleEditFlight(flight: SavedFlight) {
+    if (trip) setSelectedTrip(trip);
+    setEditFlight(flight);
+    router.push('/(tabs)/explore');
+  }
+
   async function handleAddDay() {
     if (!newDayDate) {
       setItinFormError('Elegí una fecha para el nuevo día.');
@@ -437,6 +467,31 @@ export default function TripDetailScreen() {
     }
   }
 
+  // Convierte un hotel/vuelo pendiente en un gasto real (source_hotel_id/
+  // source_flight_id lo referencian de vuelta, ver schema.sql) — a partir
+  // de ahí ya no aparece en "Pendientes de pago" y sí suma a "gastado".
+  async function handleMarkAsPaid(item: PendingPayment) {
+    if (!trip) return;
+    setMarkingPaidId(item.id);
+    setPendingPaymentError(null);
+    try {
+      await createExpense(trip.id, {
+        description: item.title,
+        amount: item.price,
+        currency: item.currency,
+        expenseDate: todayISO(),
+        budgetCategoryId: item.budgetCategoryId,
+        sourceHotelId: item.type === 'hotel' ? item.id : undefined,
+        sourceFlightId: item.type === 'flight' ? item.id : undefined,
+      });
+      await load();
+    } catch {
+      setPendingPaymentError('No se pudo registrar el pago.');
+    } finally {
+      setMarkingPaidId(null);
+    }
+  }
+
   if (loading) {
     return (
       <View style={styles.center}>
@@ -479,6 +534,37 @@ export default function TripDetailScreen() {
   const tabs = BASE_TABS.map((t, i) => ({ ...t, num: String(i + 1).padStart(2, '0') }));
 
   const categoryOptions = (budget?.categories ?? []).map((c) => ({ value: c.category_id, label: c.name }));
+
+  // Hoteles/vuelos con precio cargado que todavía no tienen un gasto real
+  // que los referencie (source_hotel_id/source_flight_id) — "Pendientes de
+  // pago" en la tab Gastos. Se recalcula acá mismo (no en el backend) para
+  // no sumar un endpoint nuevo: ya tenemos hotels/flights/expenses cargados.
+  const paidHotelIds = new Set(expenses.map((e) => e.sourceHotelId).filter((id): id is string => Boolean(id)));
+  const paidFlightIds = new Set(expenses.map((e) => e.sourceFlightId).filter((id): id is string => Boolean(id)));
+  const pendingPayments: PendingPayment[] = [
+    ...hotels
+      .filter((h) => h.price != null && !paidHotelIds.has(h.id))
+      .map((h) => ({
+        id: h.id,
+        type: 'hotel' as const,
+        title: h.name,
+        price: h.price!,
+        currency: h.currency ?? trip.currency,
+        budgetCategoryId: h.budgetCategoryId,
+      })),
+    ...flights
+      .filter((f) => f.price != null && !paidFlightIds.has(f.id))
+      .map((f) => ({
+        id: f.id,
+        type: 'flight' as const,
+        title: f.flightNumber
+          ? `Vuelo ${f.flightNumber}`
+          : `${f.departureAirport ?? '???'} → ${f.arrivalAirport ?? '???'}`,
+        price: f.price!,
+        currency: f.currency ?? trip.currency,
+        budgetCategoryId: f.budgetCategoryId,
+      })),
+  ];
 
   // Gráfico "Gasto por categoría" (tab Presupuesto) — barra apilada
   // horizontal con flex: spent por segmento, sin react-native-svg (no está
@@ -542,7 +628,7 @@ export default function TripDetailScreen() {
           en vez de usar el historial de navegación. */}
       <Stack.Screen options={{ headerShown: false }} />
       <View style={styles.root}>
-        <AppHeader />
+        <AppHeader safeTop />
         <ScrollView
           style={styles.container}
           contentContainerStyle={styles.content}
@@ -551,7 +637,7 @@ export default function TripDetailScreen() {
         >
           {/* Hero */}
           <View style={styles.heroHead}>
-            <View style={{ flex: 1 }}>
+            <View style={styles.heroTextCol}>
               <Text style={styles.eyebrow}>
                 {STATUS_LABEL[trip.status].toUpperCase()} · {daysCount} DÍAS
               </Text>
@@ -578,16 +664,24 @@ export default function TripDetailScreen() {
           <View style={styles.pass}>
             <View style={styles.passMain}>
               <Text style={styles.passEyebrow}>DOSSIER DE VIAJE · {trip.destination.toUpperCase()}</Text>
+              {/* Restructurado (2026-07-03): antes eran 3 columnas iguales
+                  (INICIO / FIN / MONEDA) en una fila, y con el ancho real
+                  de passMain (descontando el stub de 140px) cada columna
+                  quedaba en ~40-45px — la fecha completa en ISO
+                  ("2026-12-23") se partía en 2-3 renglones. Ahora INICIO y
+                  FIN comparten una sola línea con formato corto ("23 DIC →
+                  01 ENE", vía el mismo formatShort que ya usa la tarjeta de
+                  Inicio) y MONEDA baja a su propia fila — cada renglón usa
+                  todo el ancho de passMain en vez de pelear por una
+                  fracción. */}
               <View style={styles.passGrid}>
-                <View style={styles.passGridCol}>
-                  <Text style={styles.passGridK}>INICIO</Text>
-                  <Text style={styles.passGridV}>{trip.startDate}</Text>
+                <View style={styles.passGridRow}>
+                  <Text style={styles.passGridK}>FECHAS</Text>
+                  <Text style={styles.passGridV}>
+                    {formatShort(trip.startDate)} → {formatShort(trip.endDate)}
+                  </Text>
                 </View>
-                <View style={styles.passGridCol}>
-                  <Text style={styles.passGridK}>FIN</Text>
-                  <Text style={styles.passGridV}>{trip.endDate}</Text>
-                </View>
-                <View style={styles.passGridCol}>
+                <View style={styles.passGridRow}>
                   <Text style={styles.passGridK}>MONEDA</Text>
                   <Text style={styles.passGridV}>{trip.currency}</Text>
                 </View>
@@ -885,6 +979,43 @@ export default function TripDetailScreen() {
                 </Text>
               </View>
 
+              {pendingPayments.length > 0 ? (
+                <View style={styles.expenseSection}>
+                  <Text style={styles.expenseSectionTitle}>Pendientes de pago</Text>
+                  <Text style={styles.muted}>
+                    Hoteles y vuelos guardados con precio que todavía no pasaste a gastos.
+                  </Text>
+                  {pendingPaymentError ? <Text style={styles.error}>{pendingPaymentError}</Text> : null}
+                  {pendingPayments.map((item) => {
+                    const cat = budget?.categories.find((c) => c.category_id === item.budgetCategoryId);
+                    return (
+                      <View key={`${item.type}-${item.id}`} style={styles.expenseRow}>
+                        <View style={styles.expenseInfo}>
+                          <Text style={styles.expenseDescription}>
+                            {item.type === 'hotel' ? '🏨' : '✈️'} {item.title}
+                          </Text>
+                          <Text style={styles.expenseMeta}>
+                            {cat ? `${categoryGlyph(cat.name)} ${cat.name}` : 'Sin categoría'}
+                          </Text>
+                        </View>
+                        <Text style={styles.expenseAmount}>
+                          {money(item.price)} <Text style={styles.expenseCurrency}>{item.currency}</Text>
+                        </Text>
+                        <Pressable
+                          style={[styles.markPaidButton, markingPaidId === item.id && styles.markPaidButtonDisabled]}
+                          onPress={() => handleMarkAsPaid(item)}
+                          disabled={markingPaidId === item.id}
+                        >
+                          <Text style={styles.markPaidButtonText}>
+                            {markingPaidId === item.id ? '...' : 'Marcar pagado'}
+                          </Text>
+                        </Pressable>
+                      </View>
+                    );
+                  })}
+                </View>
+              ) : null}
+
               <View style={styles.form}>
                 <Text style={styles.formTitle}>{editingExpenseId ? 'Editar gasto' : '+ Registrar gasto'}</Text>
                 <SelectField
@@ -972,7 +1103,6 @@ export default function TripDetailScreen() {
                     <View style={styles.savedCardHeader}>
                       <Text style={styles.savedCardTitle}>🏨 {hotel.name}</Text>
                       <View style={styles.savedCardHeaderRight}>
-                        <BookingBadge status={hotel.status} />
                         <Pressable
                           hitSlop={8}
                           onPress={() => setDeleteTarget({ type: 'hotel', id: hotel.id, name: hotel.name })}
@@ -983,7 +1113,7 @@ export default function TripDetailScreen() {
                     </View>
                     {hotel.checkInDate ? (
                       <Text style={styles.savedMeta}>
-                        {hotel.checkInDate} → {hotel.checkOutDate}
+                        {formatShort(hotel.checkInDate)} → {hotel.checkOutDate ? formatShort(hotel.checkOutDate) : '—'}
                       </Text>
                     ) : null}
                     {hotel.price != null ? (
@@ -1049,6 +1179,7 @@ export default function TripDetailScreen() {
                         {flight.hasLayover ? (
                           <Text style={styles.layoverText}>
                             🔀 Escala en {flight.layoverAirport ?? '???'}
+                            {flight.layoverFlightNumber ? ` (vuelo ${flight.layoverFlightNumber})` : ''}
                             {flight.layoverDurationMinutes ? ` · ${minutesToHM(flight.layoverDurationMinutes)} de espera` : ''}
                           </Text>
                         ) : null}
@@ -1059,9 +1190,19 @@ export default function TripDetailScreen() {
                         ) : null}
                       </View>
                       <View style={styles.flightStub}>
-                        <Text style={styles.stubK}>VUELO</Text>
+                        {/* stubK es blanco 50% para el fondo OSCURO de
+                            passStub — acá el fondo es paper2 (claro), así
+                            que se pisa el color o quedaba casi invisible. */}
+                        <Text style={[styles.stubK, styles.stubKOnLight]}>VUELO</Text>
                         <Text style={styles.stubV}>{flight.flightNumber ?? '—'}</Text>
-                        <BookingBadge status={flight.status} />
+                        {/* Editar/Eliminar apilados (no en fila): el stub
+                            mide 108px de ancho, muy angosto para los dos
+                            links uno al lado del otro sin que se corten o
+                            se salgan de la caja — apilados heredan el
+                            mismo gap:6 vertical del resto del stub. */}
+                        <Pressable hitSlop={8} onPress={() => handleEditFlight(flight)}>
+                          <Text style={styles.itemEditLink}>Editar</Text>
+                        </Pressable>
                         <Pressable
                           hitSlop={8}
                           onPress={() =>
@@ -1072,7 +1213,7 @@ export default function TripDetailScreen() {
                             })
                           }
                         >
-                          <Text style={styles.itemDeleteLink}>Eliminar</Text>
+                          <Text style={[styles.itemDeleteLink, styles.stubDeleteLink]}>Eliminar</Text>
                         </Pressable>
                       </View>
                     </View>
@@ -1171,16 +1312,6 @@ function LegendItem({ color, label, count }: { color: string; label: string; cou
   );
 }
 
-function BookingBadge({ status }: { status: BookingStatus }) {
-  return (
-    <View style={[styles.bookingBadge, status === 'booked' && styles.bookingBadgeBooked]}>
-      <Text style={[styles.bookingBadgeText, status === 'booked' && styles.bookingBadgeTextBooked]}>
-        {BOOKING_LABEL[status]}
-      </Text>
-    </View>
-  );
-}
-
 function TimelineItem({ activity, onDelete }: { activity: Activity; onDelete: () => void }) {
   return (
     <View style={styles.item}>
@@ -1248,6 +1379,13 @@ const styles = StyleSheet.create({
 
   // Hero
   heroHead: { flexDirection: 'row', alignItems: 'flex-start', gap: 16, flexWrap: 'wrap', marginBottom: spacing.stackLg },
+  // `flex: 1` sin más en un row con flexWrap deja que Yoga lo achique hasta
+  // casi 0 en vez de mandar heroActions a su propia línea (bug visto en
+  // celular: "Navidad" se renderizaba letra por letra en una columna de
+  // unos 30px). `minWidth` le pone un piso: si no entra al lado de los
+  // botones con ese ancho mínimo, ahora sí wrappea la fila completa en vez
+  // de aplastar el texto.
+  heroTextCol: { flex: 1, minWidth: 240 },
   eyebrow: { fontFamily: fonts.mono, fontSize: 11.5, letterSpacing: tracking.eyebrow, textTransform: 'uppercase', color: colors.muted },
   heroTitle: { fontFamily: fonts.displaySemibold, fontSize: 30, fontWeight: '700', color: colors.ink, letterSpacing: -0.6, marginTop: 6 },
   heroSub: { fontSize: 14.5, color: colors.inkSoft, marginTop: 8, maxWidth: 420 },
@@ -1295,10 +1433,10 @@ const styles = StyleSheet.create({
     color: 'rgba(255,255,255,0.5)',
     marginBottom: 14,
   },
-  passGrid: { flexDirection: 'row', gap: 20 },
-  passGridCol: { flex: 1 },
+  passGrid: { gap: 10 },
+  passGridRow: {},
   passGridK: { fontFamily: fonts.mono, fontSize: 10, letterSpacing: tracking.wide, textTransform: 'uppercase', color: 'rgba(255,255,255,0.5)' },
-  passGridV: { fontFamily: fonts.displaySemibold, fontWeight: '700', fontSize: 17, color: colors.white, marginTop: 4 },
+  passGridV: { fontFamily: fonts.displaySemibold, fontWeight: '700', fontSize: 16, color: colors.white, marginTop: 4 },
   passStub: {
     width: 140,
     backgroundColor: colors.inkSoft,
@@ -1326,6 +1464,12 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     marginTop: 8,
     marginBottom: 4,
+    // passStub tiene alignItems por default ('stretch'), pero al tener un
+    // ancho fijo el ring no se estira — sin esto quedaba pegado al borde
+    // izquierdo del stub en vez de centrado, mientras las etiquetas de
+    // texto de al lado (que sí ocupan el ancho completo) parecían
+    // "descentradas" respecto a él.
+    alignSelf: 'center',
   },
   ringPct: { fontFamily: fonts.displaySemibold, fontWeight: '700', fontSize: 17, color: colors.white },
   ringLabel: { fontFamily: fonts.mono, fontSize: 8, color: 'rgba(255,255,255,0.6)', letterSpacing: 0.5, marginTop: 1 },
@@ -1370,6 +1514,16 @@ const styles = StyleSheet.create({
   // aparecer muchas veces en una misma lista.
   itemDeleteGlyph: { color: colors.muted, fontSize: 14, fontWeight: '700', paddingHorizontal: 2 },
   itemDeleteLink: { fontFamily: fonts.mono, fontSize: 10.5, color: colors.stamp, marginTop: 4 },
+  itemEditLink: { fontFamily: fonts.mono, fontSize: 10.5, color: colors.inkSoft },
+  // El stub de vuelo ya separa a sus hijos con gap:6 (flightStub) — sin
+  // esto, el marginTop:4 de itemDeleteLink se sumaba a ese gap y el
+  // "Eliminar" quedaba más lejos de "Editar" que "Editar" del badge de
+  // arriba, rompiendo el ritmo vertical de la columna.
+  stubDeleteLink: { marginTop: 0 },
+  // stubK reutiliza blanco 50% pensado para el fondo oscuro de passStub;
+  // acá el stub de vuelo tiene fondo claro (paper2) y ese blanco quedaba
+  // casi invisible.
+  stubKOnLight: { color: colors.muted },
 
   // Día / timeline
   dayBlock: { marginBottom: spacing.stackLg },
@@ -1450,10 +1604,6 @@ const styles = StyleSheet.create({
   savedMeta: { fontFamily: fonts.mono, fontSize: 12.5, color: colors.inkSoft },
   savedPrice: { fontFamily: fonts.displaySemibold, fontSize: 18, fontWeight: '700', color: colors.ink, marginTop: 2 },
   savedPriceUnit: { fontSize: 12.5, fontWeight: '400', color: colors.muted },
-  bookingBadge: { backgroundColor: colors.paper2, borderRadius: radius.full, paddingHorizontal: 10, paddingVertical: 4, alignSelf: 'flex-start' },
-  bookingBadgeBooked: { backgroundColor: colors.primaryFixed },
-  bookingBadgeText: { fontFamily: fonts.mono, fontSize: 10.5, color: colors.inkSoft },
-  bookingBadgeTextBooked: { color: colors.ink },
 
   flightCard: {
     backgroundColor: colors.surface,
@@ -1618,4 +1768,14 @@ const styles = StyleSheet.create({
   expenseCurrency: { fontSize: 11, fontWeight: '400', color: colors.muted },
   expenseActions: { flexDirection: 'row', gap: 10, alignItems: 'center' },
   itemEditGlyph: { color: colors.muted, fontSize: 14, paddingHorizontal: 2 },
+
+  // Botón "Marcar pagado" en la sección "Pendientes de pago" (tab Gastos)
+  markPaidButton: {
+    backgroundColor: colors.stamp,
+    borderRadius: radius.sm,
+    paddingVertical: 6,
+    paddingHorizontal: 10,
+  },
+  markPaidButtonDisabled: { opacity: 0.5 },
+  markPaidButtonText: { fontFamily: fonts.mono, fontSize: 10.5, fontWeight: '700', color: colors.white },
 });

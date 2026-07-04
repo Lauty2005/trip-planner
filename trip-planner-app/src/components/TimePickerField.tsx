@@ -103,6 +103,7 @@ export function TimePickerField({
 const CELL_HEIGHT = 40;
 
 const styles = StyleSheet.create({
+  // minHeight: ver comentario del mismo fix en PriceField.tsx.
   fieldLabel: {
     fontFamily: fonts.mono,
     fontSize: 10.5,
@@ -110,6 +111,7 @@ const styles = StyleSheet.create({
     color: colors.muted,
     marginBottom: 4,
     marginLeft: 2,
+    minHeight: 28,
   },
   fieldBox: {
     flexDirection: 'row',

@@ -5,16 +5,16 @@ import { listTrips } from '@/api/trips';
 import { useSelectedTripStore } from '@/store/selectedTrip';
 import type { Trip } from '@/types';
 import { colors, spacing, radius, cardShadow, fonts, tracking, layout } from '@/theme';
+import { AppHeader } from '@/components/AppHeader';
 
 // Mis viajes — rediseño "Rumbo": tarjetas tipo ficha de dossier (papel,
 // borde fino, eyebrow mono con el destino) en vez de las tarjetas Material
 // del rediseño Stitch anterior.
 //
-// El botón "+ Nuevo" vivía en headerRight del Stack.Screen nativo; desde
-// que app/(tabs)/_layout.tsx usa un header custom compartido (AppHeader),
-// headerRight/headerLeft/headerTitle del header nativo ya no se dibujan
-// (un `header` a medida reemplaza esos slots por completo) — por eso el
-// botón se movió acá arriba, dentro del cuerpo de la pantalla.
+// El botón "+ Nuevo" vivía en headerRight del Stack.Screen nativo; con el
+// grupo (tabs) usando un header custom (AppHeader) en vez del nativo,
+// headerRight/headerLeft/headerTitle ya no se dibujan — por eso el botón
+// vive acá arriba, dentro del cuerpo de la pantalla.
 
 export default function TripsListScreen() {
   const [trips, setTrips] = useState<Trip[]>([]);
@@ -50,7 +50,8 @@ export default function TripsListScreen() {
   }
 
   return (
-    <>
+    <View style={styles.pageRoot}>
+      <AppHeader safeTop />
       <View style={styles.screenHead}>
         <Text style={styles.eyebrow}>MIS VIAJES</Text>
         <Pressable style={styles.headerButton} onPress={() => router.push('/new-trip')} hitSlop={12}>
@@ -98,12 +99,13 @@ export default function TripsListScreen() {
           )}
         />
       )}
-    </>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
-  root: { backgroundColor: colors.background },
+  pageRoot: { flex: 1, backgroundColor: colors.background },
+  root: { flex: 1, backgroundColor: colors.background },
   center: {
     flex: 1,
     justifyContent: 'center',

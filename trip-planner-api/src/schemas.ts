@@ -121,6 +121,11 @@ export const expenseCreateSchema = z.object({
   amount: z.number().min(0),
   currency: currency.optional(),
   expenseDate: dateLike,
+  // Se mandan cuando el gasto se generó desde "Marcar como pagado" en un
+  // hotel/vuelo guardado (tab Gastos) — ver chk_expenses_single_source en
+  // schema.sql, a lo sumo uno de los dos.
+  sourceHotelId: uuid.nullish(),
+  sourceFlightId: uuid.nullish(),
 });
 
 export const expenseUpdateSchema = z.object({
@@ -144,12 +149,14 @@ export const hotelCreateSchema = z.object({
   bookingSource: z.string().max(50).nullish(),
   externalOfferId: z.string().max(150).nullish(),
   notes: z.string().nullish(),
+  budgetCategoryId: uuid.nullish(),
 });
 
 export const hotelUpdateSchema = z.object({
   status: z.enum(['candidate', 'booked', 'cancelled']).optional(),
   price: z.number().min(0).nullish(),
   notes: z.string().nullish(),
+  budgetCategoryId: uuid.nullish(),
 });
 
 // ---- Flights ------------------------------------------------------------
@@ -170,12 +177,32 @@ export const flightCreateSchema = z.object({
   hasLayover: z.boolean().optional(),
   layoverAirport: z.string().max(10).nullish(),
   layoverDurationMinutes: z.number().int().nullish(),
+  layoverFlightNumber: z.string().max(20).nullish(),
+  budgetCategoryId: uuid.nullish(),
 });
 
+// Antes solo permitía tocar status/price/notes (todo el resto de un
+// vuelo cargado quedaba fijo). Se amplía para soportar "Editar vuelo"
+// desde el dossier (2026-07-04, a pedido de Lautaro) — mismos campos que
+// flightCreateSchema, todos opcionales acá porque un PATCH puede tocar
+// solo alguno.
 export const flightUpdateSchema = z.object({
-  status: z.enum(['candidate', 'booked', 'cancelled']).optional(),
+  airline: z.string().max(100).nullish(),
+  flightNumber: z.string().max(20).nullish(),
+  departureAirport: z.string().max(10).nullish(),
+  arrivalAirport: z.string().max(10).nullish(),
+  departureDatetime: dateLike.optional(),
+  arrivalDatetime: dateLike.optional(),
   price: z.number().min(0).nullish(),
+  currency: currency.optional(),
   notes: z.string().nullish(),
+  status: z.enum(['candidate', 'booked', 'cancelled']).optional(),
+  legType: z.enum(['departure', 'return', 'one_way']).optional(),
+  hasLayover: z.boolean().optional(),
+  layoverAirport: z.string().max(10).nullish(),
+  layoverDurationMinutes: z.number().int().nullish(),
+  layoverFlightNumber: z.string().max(20).nullish(),
+  budgetCategoryId: uuid.nullish(),
 });
 
 // ---- Saved places -------------------------------------------------------

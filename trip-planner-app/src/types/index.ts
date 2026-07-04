@@ -69,6 +69,10 @@ export interface Expense {
   tripId: string;
   budgetCategoryId?: string;
   paidByUserId?: string;
+  // Si este gasto se generó desde "Marcar como pagado" en un hotel/vuelo
+  // guardado (tab Gastos), a lo sumo uno de los dos queda seteado.
+  sourceHotelId?: string;
+  sourceFlightId?: string;
   description: string;
   amount: number;
   currency: string;
@@ -88,6 +92,7 @@ export interface Hotel {
   currency: string;
   status: BookingStatus;
   bookingSource?: string;
+  budgetCategoryId?: string;
 }
 
 export interface Flight {
@@ -102,6 +107,7 @@ export interface Flight {
   price?: number;
   currency: string;
   status: BookingStatus;
+  budgetCategoryId?: string;
 }
 
 export interface SavedPlace {

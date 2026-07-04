@@ -162,6 +162,7 @@ export function DatePickerField({
 }
 
 const styles = StyleSheet.create({
+  // minHeight: ver comentario del mismo fix en PriceField.tsx.
   fieldLabel: {
     fontFamily: fonts.mono,
     fontSize: 10.5,
@@ -170,6 +171,7 @@ const styles = StyleSheet.create({
     color: colors.muted,
     marginBottom: 4,
     marginLeft: 4,
+    minHeight: 28,
   },
   fieldBox: {
     flexDirection: 'row',

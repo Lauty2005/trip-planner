@@ -1,5 +1,4 @@
 import { Stack } from 'expo-router';
-import { AppHeader } from '@/components/AppHeader';
 import { colors } from '@/theme';
 
 // Navegación principal — pasó de tab bar abajo a header arriba (pedido de
@@ -21,11 +20,22 @@ import { colors } from '@/theme';
 // queda es solo un redirect por si algo viejo todavía apunta acá (no se
 // pudo borrar el archivo en esta sesión por falta de acceso a shell; ver
 // el comentario en ese archivo).
+//
+// 2026-07-03, a pedido de Lautaro ("unificá la nav, que se vea igual que
+// en la pestaña del viaje seleccionado"): antes este Stack dibujaba
+// AppHeader vía `header: () => <AppHeader />` (header nativo custom), y
+// app/trip/[tripId]/index.tsx lo montaba a mano con `headerShown: false` +
+// `<AppHeader safeTop />` dentro de un View — dos mecanismos distintos
+// para el mismo componente, que en la práctica no se comportaban 100%
+// igual (insets, altura) entre plataformas. Ahora TODAS las pantallas
+// (acá y el dossier) usan el mismo camino: headerShown:false acá, y cada
+// pantalla del grupo dibuja <AppHeader safeTop /> ella misma, como primer
+// hijo de su View raíz.
 export default function TabsLayout() {
   return (
     <Stack
       screenOptions={{
-        header: () => <AppHeader />,
+        headerShown: false,
         contentStyle: { backgroundColor: colors.background },
       }}
     >

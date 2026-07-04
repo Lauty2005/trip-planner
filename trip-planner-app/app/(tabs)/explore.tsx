@@ -1,8 +1,19 @@
 import { useEffect, useState } from 'react';
 import { View, Text, TextInput, Pressable, ScrollView, StyleSheet } from 'react-native';
 import { router } from 'expo-router';
-import { createHotel, createFlight, estimateFlightArrival, type FlightLegType, type FlightEstimate } from '@/api/trips';
+import {
+  createHotel,
+  createFlight,
+  updateFlight,
+  estimateFlightArrival,
+  type FlightLegType,
+  type FlightEstimate,
+  type FlightFormPayload,
+  type SavedFlight,
+} from '@/api/trips';
+import { getBudgetCategoryOptions } from '@/api/budget';
 import { useSelectedTripStore } from '@/store/selectedTrip';
+import { useEditFlightStore } from '@/store/editFlight';
 import { DatePickerField } from '@/components/DatePickerField';
 import { SelectField } from '@/components/SelectField';
 import { TimePickerField } from '@/components/TimePickerField';
@@ -10,6 +21,7 @@ import { PriceField } from '@/components/PriceField';
 import { CURRENCIES } from '@/data/currencies';
 import { AIRLINES } from '@/data/airlines';
 import { colors, spacing, radius, cardShadow, fonts, tracking, layout } from '@/theme';
+import { AppHeader } from '@/components/AppHeader';
 
 const AIRLINE_OPTIONS = AIRLINES.map((name) => ({ value: name, label: name }));
 
@@ -63,9 +75,44 @@ function minutesToHM(mins: number): string {
   return h > 0 ? `${h}h ${m}min` : `${m}min`;
 }
 
+// Separa un datetime guardado ('YYYY-MM-DDTHH:MM:SS...') en fecha + hora
+// para precargar el form al editar un vuelo — a propósito NO pasa por
+// `new Date(...)` (que reinterpretaría la hora en el timezone del
+// navegador): toDatetime() guarda el string tal cual lo tipeó el usuario,
+// así que leerlo de vuelta con un split simple es lo único que reconstruye
+// exactamente esa misma hora sin importar el timezone de quien edita.
+function splitDatetime(datetime: string): { date: string; time: string } {
+  const [date, rest] = datetime.split('T');
+  return { date: date ?? '', time: (rest ?? '00:00:00').slice(0, 5) };
+}
+
 export default function ExploreScreen() {
   const [mode, setMode] = useState<Mode>('hotels');
   const selectedTrip = useSelectedTripStore((state) => state.selectedTrip);
+  const editFlight = useEditFlightStore((state) => state.editFlight);
+  const clearEditFlight = useEditFlightStore((state) => state.clearEditFlight);
+
+  // Categorías de presupuesto del viaje, para poder elegir a cuál cae el
+  // gasto cuando el hotel/vuelo se marque como pagado (tab Gastos del
+  // dossier) — se recarga cada vez que cambia el viaje seleccionado.
+  const [budgetCategoryOptions, setBudgetCategoryOptions] = useState<{ value: string; label: string }[]>([]);
+  useEffect(() => {
+    if (!selectedTrip) {
+      setBudgetCategoryOptions([]);
+      return;
+    }
+    let cancelled = false;
+    getBudgetCategoryOptions(selectedTrip.id)
+      .then((cats) => {
+        if (!cancelled) setBudgetCategoryOptions(cats.map((c) => ({ value: c.id, label: c.name })));
+      })
+      .catch(() => {
+        if (!cancelled) setBudgetCategoryOptions([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedTrip]);
 
   // Hotel
   const [hotelName, setHotelName] = useState('');
@@ -75,6 +122,7 @@ export default function ExploreScreen() {
   const [hotelPrice, setHotelPrice] = useState<number | undefined>(undefined);
   const [hotelCurrency, setHotelCurrency] = useState('');
   const [hotelNotes, setHotelNotes] = useState('');
+  const [hotelBudgetCategoryId, setHotelBudgetCategoryId] = useState('');
 
   // Vuelo
   const [legType, setLegType] = useState<FlightLegType>('one_way');
@@ -97,11 +145,17 @@ export default function ExploreScreen() {
   // Escala: un solo stopover informativo (aeropuerto + tiempo de espera).
   const [hasLayover, setHasLayover] = useState(false);
   const [layoverAirport, setLayoverAirport] = useState('');
+  const [layoverFlightNumber, setLayoverFlightNumber] = useState('');
   const [layoverHours, setLayoverHours] = useState('');
   const [layoverMinutes, setLayoverMinutes] = useState('');
   const [flightPrice, setFlightPrice] = useState<number | undefined>(undefined);
   const [flightCurrency, setFlightCurrency] = useState('');
   const [flightNotes, setFlightNotes] = useState('');
+  const [flightBudgetCategoryId, setFlightBudgetCategoryId] = useState('');
+  // Si no es null, "Guardar vuelo" actualiza este vuelo (PATCH) en vez de
+  // crear uno nuevo — lo setea loadFlightForEdit cuando se entra acá desde
+  // el botón "Editar" del dossier (ver useEditFlightStore).
+  const [editingFlightId, setEditingFlightId] = useState<string | null>(null);
 
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -163,6 +217,7 @@ export default function ExploreScreen() {
     setHotelPrice(undefined);
     setHotelCurrency('');
     setHotelNotes('');
+    setHotelBudgetCategoryId('');
   }
 
   function resetFlightForm() {
@@ -180,12 +235,68 @@ export default function ExploreScreen() {
     setEstimateError(null);
     setHasLayover(false);
     setLayoverAirport('');
+    setLayoverFlightNumber('');
     setLayoverHours('');
     setLayoverMinutes('');
     setFlightPrice(undefined);
     setFlightCurrency('');
     setFlightNotes('');
+    setFlightBudgetCategoryId('');
+    setEditingFlightId(null);
   }
+
+  // Precarga el form con un vuelo ya guardado (botón "Editar" en el
+  // dossier, vía useEditFlightStore) — a diferencia de una carga nueva,
+  // fija manualArrival=true para respetar la llegada real ya guardada en
+  // vez de disparar una nueva estimación automática que la pisaría.
+  function loadFlightForEdit(flight: SavedFlight) {
+    setMode('flights');
+    setEditingFlightId(flight.id);
+    setLegType(flight.legType);
+    setAirline(flight.airline ?? '');
+    setFlightNumber(flight.flightNumber ?? '');
+    setDepartureAirport(flight.departureAirport ?? '');
+    setArrivalAirport(flight.arrivalAirport ?? '');
+    const dep = flight.departureDatetime ? splitDatetime(flight.departureDatetime) : { date: '', time: '' };
+    setDepartDate(dep.date);
+    setDepartTime(dep.time);
+    const arr = flight.arrivalDatetime ? splitDatetime(flight.arrivalDatetime) : { date: '', time: '' };
+    setArriveDate(arr.date);
+    setArriveTime(arr.time);
+    setManualArrival(true);
+    setEstimatedArrival(null);
+    setEstimateError(null);
+    setHasLayover(flight.hasLayover);
+    setLayoverAirport(flight.layoverAirport ?? '');
+    setLayoverFlightNumber(flight.layoverFlightNumber ?? '');
+    if (flight.layoverDurationMinutes != null) {
+      setLayoverHours(String(Math.floor(flight.layoverDurationMinutes / 60)));
+      setLayoverMinutes(String(flight.layoverDurationMinutes % 60));
+    } else {
+      setLayoverHours('');
+      setLayoverMinutes('');
+    }
+    setFlightPrice(flight.price);
+    setFlightCurrency(flight.currency ?? '');
+    setFlightNotes(flight.notes ?? '');
+    setFlightBudgetCategoryId(flight.budgetCategoryId ?? '');
+    setError(null);
+    setSavedLabel(null);
+  }
+
+  function cancelEditFlight() {
+    resetFlightForm();
+  }
+
+  // Se dispara al entrar a Reservas viniendo del botón "Editar" del
+  // dossier (handleEditFlight en app/trip/[tripId]/index.tsx setea
+  // editFlight antes de navegar acá). Se limpia el store apenas se
+  // consume para que no quede "pegado" si se vuelve a esta pantalla.
+  useEffect(() => {
+    if (!editFlight) return;
+    loadFlightForEdit(editFlight);
+    clearEditFlight();
+  }, [editFlight]);
 
   function handleSwapAirports() {
     setDepartureAirport(arrivalAirport);
@@ -241,6 +352,7 @@ export default function ExploreScreen() {
         price: hotelPrice,
         currency: hotelCurrency || selectedTrip.currency,
         notes: hotelNotes.trim() || undefined,
+        budgetCategoryId: hotelBudgetCategoryId || undefined,
       });
       setSavedLabel(hotelName.trim());
       resetHotelForm();
@@ -290,7 +402,11 @@ export default function ExploreScreen() {
       const layoverDurationMinutes = hasLayover
         ? Number(layoverHours || '0') * 60 + Number(layoverMinutes || '0')
         : undefined;
-      await createFlight(selectedTrip.id, {
+      // Editando y se desmarcó "Con escala": mandamos `null` explícito
+      // (no `undefined`) para que el PATCH limpie esas columnas en vez de
+      // dejar pisada la escala vieja (ver comentario en FlightFormPayload).
+      const clearingLayover = Boolean(editingFlightId) && !hasLayover;
+      const payload: FlightFormPayload = {
         airline: airline.trim() || undefined,
         flightNumber: flightNumber.trim() || undefined,
         departureAirport: departureAirport.trim().toUpperCase() || undefined,
@@ -302,9 +418,21 @@ export default function ExploreScreen() {
         notes: flightNotes.trim() || undefined,
         legType,
         hasLayover,
-        layoverAirport: hasLayover ? layoverAirport.trim().toUpperCase() : undefined,
-        layoverDurationMinutes: hasLayover && layoverDurationMinutes ? layoverDurationMinutes : undefined,
-      });
+        layoverAirport: hasLayover ? layoverAirport.trim().toUpperCase() || undefined : clearingLayover ? null : undefined,
+        layoverDurationMinutes: hasLayover && layoverDurationMinutes ? layoverDurationMinutes : clearingLayover ? null : undefined,
+        layoverFlightNumber: hasLayover
+          ? layoverFlightNumber.trim().toUpperCase() || undefined
+          : clearingLayover
+            ? null
+            : undefined,
+        budgetCategoryId: flightBudgetCategoryId || undefined,
+      };
+
+      if (editingFlightId) {
+        await updateFlight(editingFlightId, payload);
+      } else {
+        await createFlight(selectedTrip.id, payload);
+      }
       setSavedLabel(
         `${LEG_TYPE_LABEL[legType]}${
           departureAirport && arrivalAirport ? `: ${departureAirport.toUpperCase()} → ${arrivalAirport.toUpperCase()}` : ''
@@ -327,9 +455,11 @@ export default function ExploreScreen() {
   const showArrivalFields = manualArrival;
 
   return (
-    <ScrollView style={styles.root} contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
-      {/* Título */}
-      <View style={styles.titleBlock}>
+    <View style={styles.pageRoot}>
+      <AppHeader safeTop />
+      <ScrollView style={styles.root} contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
+        {/* Título */}
+        <View style={styles.titleBlock}>
         <Text style={styles.eyebrow}>RESERVAS</Text>
         <Text style={styles.title}>Cargá lo que ya tenés</Text>
         <Text style={styles.subtitle}>
@@ -400,6 +530,17 @@ export default function ExploreScreen() {
                 />
               </View>
             </View>
+            {/* Categoría de presupuesto: no suma nada a "gastado" por sí
+                sola — solo queda guardada para cuando marqués este hotel
+                como pagado desde la tab Gastos. */}
+            <SelectField
+              glyph="🏷️"
+              label="Categoría de presupuesto (opcional)"
+              placeholder="Sin categoría"
+              value={hotelBudgetCategoryId}
+              onChange={setHotelBudgetCategoryId}
+              options={budgetCategoryOptions}
+            />
             <Field glyph="📝" label="Notas (opcional)" placeholder="Ej: reserva a nombre de..." value={hotelNotes} onChangeText={setHotelNotes} />
 
             {error ? <Text style={styles.error}>{error}</Text> : null}
@@ -429,6 +570,15 @@ export default function ExploreScreen() {
               ))}
             </View>
             <Text style={styles.hint}>Con origen, destino, fecha y hora de salida, la llegada se calcula sola. Podés ingresarla a mano si preferís.</Text>
+
+            {editingFlightId ? (
+              <View style={styles.editingBanner}>
+                <Text style={styles.editingBannerText}>✎ Editando vuelo guardado</Text>
+                <Pressable onPress={cancelEditFlight}>
+                  <Text style={styles.editingBannerLink}>Cancelar edición</Text>
+                </Pressable>
+              </View>
+            ) : null}
 
             <View style={styles.fieldRow}>
               <View style={styles.fieldRowItem}>
@@ -461,15 +611,29 @@ export default function ExploreScreen() {
             </Pressable>
             {hasLayover ? (
               <>
-                <Field
-                  glyph="🔀"
-                  label="Aeropuerto de la escala"
-                  placeholder="Ej: BOG"
-                  value={layoverAirport}
-                  onChangeText={setLayoverAirport}
-                  autoCapitalize="characters"
-                  maxLength={10}
-                />
+                <View style={styles.fieldRow}>
+                  <View style={styles.fieldRowItem}>
+                    <Field
+                      glyph="🔀"
+                      label="Aeropuerto de la escala"
+                      placeholder="Ej: BOG"
+                      value={layoverAirport}
+                      onChangeText={setLayoverAirport}
+                      autoCapitalize="characters"
+                      maxLength={10}
+                    />
+                  </View>
+                  <View style={styles.fieldRowItem}>
+                    <Field
+                      glyph="#️⃣"
+                      label="N° vuelo escala (opcional)"
+                      placeholder="Ej: AR5678"
+                      value={layoverFlightNumber}
+                      onChangeText={setLayoverFlightNumber}
+                      autoCapitalize="characters"
+                    />
+                  </View>
+                </View>
                 <View style={styles.fieldRow}>
                   <View style={styles.fieldRowItem}>
                     <Field glyph="⏱️" label="Espera (horas)" placeholder="0" value={layoverHours} onChangeText={setLayoverHours} keyboardType="numeric" />
@@ -566,6 +730,17 @@ export default function ExploreScreen() {
                 />
               </View>
             </View>
+            {/* Categoría de presupuesto: no suma nada a "gastado" por sí
+                sola — solo queda guardada para cuando marqués este vuelo
+                como pagado desde la tab Gastos. */}
+            <SelectField
+              glyph="🏷️"
+              label="Categoría de presupuesto (opcional)"
+              placeholder="Sin categoría"
+              value={flightBudgetCategoryId}
+              onChange={setFlightBudgetCategoryId}
+              options={budgetCategoryOptions}
+            />
             <Field glyph="📝" label="Notas (opcional)" placeholder="Ej: check-in online pendiente" value={flightNotes} onChangeText={setFlightNotes} />
 
             {error ? <Text style={styles.error}>{error}</Text> : null}
@@ -575,7 +750,9 @@ export default function ExploreScreen() {
               onPress={handleSaveFlight}
               disabled={!selectedTrip || saving}
             >
-              <Text style={styles.saveButtonText}>{saving ? 'Guardando...' : '＋ Guardar vuelo'}</Text>
+              <Text style={styles.saveButtonText}>
+                {saving ? 'Guardando...' : editingFlightId ? '✓ Guardar cambios' : '＋ Guardar vuelo'}
+              </Text>
             </Pressable>
           </>
         )}
@@ -593,7 +770,8 @@ export default function ExploreScreen() {
           ) : null}
         </View>
       ) : null}
-    </ScrollView>
+      </ScrollView>
+    </View>
   );
 }
 
@@ -619,6 +797,7 @@ function Field({
 }
 
 const styles = StyleSheet.create({
+  pageRoot: { flex: 1, backgroundColor: colors.background },
   root: { flex: 1, backgroundColor: colors.background },
   content: {
     padding: spacing.containerPadding,
@@ -685,7 +864,14 @@ const styles = StyleSheet.create({
   },
   fieldRow: { flexDirection: 'row', gap: spacing.stackMd, alignItems: 'flex-start' },
   fieldRowItem: { flex: 1 },
-  fieldLabel: { fontFamily: fonts.mono, fontSize: 10.5, letterSpacing: tracking.wide, color: colors.muted, marginBottom: 4, marginLeft: 2 },
+  // minHeight reserva lugar para 2 renglones aunque el label entre en uno
+  // solo — sin esto, en una fieldRow donde un label es corto ("MONEDA") y
+  // el otro largo ("N° DE VUELO (OPCIONAL)"), el que entra en 1 línea
+  // arranca su fieldBox más arriba que el que se parte en 2, y las dos
+  // cajas quedan desalineadas entre sí (bug visto en pantalla). Mismo
+  // fix replicado en PriceField/SelectField/DatePickerField/TimePickerField
+  // (cada uno define su propio fieldLabel).
+  fieldLabel: { fontFamily: fonts.mono, fontSize: 10.5, letterSpacing: tracking.wide, color: colors.muted, marginBottom: 4, marginLeft: 2, minHeight: 28 },
   fieldBox: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -694,9 +880,21 @@ const styles = StyleSheet.create({
     borderColor: colors.line,
     borderRadius: radius.lg,
     paddingHorizontal: 12,
+    // paddingVertical acá (en vez de en fieldInput) para que la altura de
+    // la caja la determine siempre el mismo padding sin importar si adentro
+    // hay un <TextInput> (Field/PriceField) o un <Text> dentro de un
+    // Pressable (SelectField/DatePickerField/TimePickerField) — en web,
+    // react-native-web renderiza el TextInput como un <input> con su
+    // propio alto intrínseco, que no coincide con el de un <span>/<div> de
+    // Text aunque ambos tengan el mismo paddingVertical puesto en el hijo.
+    // Poniendo el padding en la caja (que sí mide flexbox real) los 5
+    // componentes de campo quedan con la MISMA altura de fieldBox siempre,
+    // así el fieldRow no desalinea un campo respecto al de al lado (bug
+    // visto en la fila Aerolínea/N° de vuelo y en Precio/Moneda).
+    paddingVertical: 12,
   },
   fieldGlyph: { fontSize: 16, marginRight: 8 },
-  fieldInput: { flex: 1, paddingVertical: 12, fontSize: 16, color: colors.ink },
+  fieldInput: { flex: 1, fontSize: 16, color: colors.ink },
 
   // Botón "⇄" para invertir origen/destino, alineado con la altura de los
   // dos inputs de la fila (le pusimos margin-top para que no quede pegado
@@ -704,7 +902,10 @@ const styles = StyleSheet.create({
   swapButton: {
     width: 36,
     height: 44,
-    marginTop: 18,
+    // Alineado con el nuevo minHeight del label (28 + marginBottom 4 = 32),
+    // para que el botón quede a la altura del fieldBox sin importar si el
+    // label de al lado se partió en 1 o 2 líneas.
+    marginTop: 32,
     alignItems: 'center',
     justifyContent: 'center',
     borderRadius: radius.lg,
@@ -725,6 +926,22 @@ const styles = StyleSheet.create({
   estimateActions: { flexDirection: 'row', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8 },
   estimateLink: { fontFamily: fonts.mono, fontSize: 11.5, color: colors.stamp, fontWeight: '700' },
   estimateLinkMuted: { fontFamily: fonts.mono, fontSize: 11.5, color: colors.muted },
+
+  // Banner "Editando vuelo guardado" (form en modo edición)
+  editingBanner: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    flexWrap: 'wrap',
+    gap: 8,
+    backgroundColor: colors.paper2,
+    borderRadius: radius.lg,
+    paddingVertical: 10,
+    paddingHorizontal: spacing.stackMd,
+    marginTop: -4,
+  },
+  editingBannerText: { fontSize: 13, fontWeight: '600', color: colors.ink },
+  editingBannerLink: { fontFamily: fonts.mono, fontSize: 11.5, color: colors.stamp, fontWeight: '700' },
 
   // Checkbox "Con escala"
   checkboxRow: { flexDirection: 'row', alignItems: 'center', gap: 10 },

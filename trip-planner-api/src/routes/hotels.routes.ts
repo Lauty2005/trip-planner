@@ -34,7 +34,10 @@ router.get('/trips/:tripId/hotels', requireTripAccess('viewer'), async (req, res
 
 router.post('/trips/:tripId/hotels', requireTripAccess('editor'), validateBody(hotelCreateSchema), async (req, res, next) => {
   try {
-    const { name, address, checkInDate, checkOutDate, price, currency = 'USD', bookingSource, externalOfferId, notes } = req.body;
+    const {
+      name, address, checkInDate, checkOutDate, price, currency = 'USD',
+      bookingSource, externalOfferId, notes, budgetCategoryId,
+    } = req.body;
     let { lat, lng } = req.body;
     // Mismo criterio que activities.routes.ts: sin coordenadas explícitas,
     // geocodificamos dirección (o nombre, si no hay dirección) + destino del
@@ -50,9 +53,9 @@ router.post('/trips/:tripId/hotels', requireTripAccess('editor'), validateBody(h
       }
     }
     const result = await pool.query(
-      `INSERT INTO hotels (trip_id, name, address, lat, lng, check_in_date, check_out_date, price, currency, booking_source, external_offer_id, notes)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *`,
-      [req.params.tripId, name, address, lat, lng, checkInDate, checkOutDate, price, currency, bookingSource, externalOfferId, notes]
+      `INSERT INTO hotels (trip_id, name, address, lat, lng, check_in_date, check_out_date, price, currency, booking_source, external_offer_id, notes, budget_category_id)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING *`,
+      [req.params.tripId, name, address, lat, lng, checkInDate, checkOutDate, price, currency, bookingSource, externalOfferId, notes, budgetCategoryId]
     );
     res.status(201).json(result.rows[0]);
   } catch (err) {
@@ -71,11 +74,15 @@ router.patch('/hotels/:id', validateBody(hotelUpdateSchema), async (req, res, ne
     if (!tripId) return res.status(404).json({ error: { code: 'not_found', message: 'Hotel no encontrado' } });
     (req.params as Record<string, string>).tripId = tripId;
     await requireTripAccess('editor')(req, res, async () => {
-      const { status, price, notes } = req.body;
+      const { status, price, notes, budgetCategoryId } = req.body;
       const result = await pool.query(
-        `UPDATE hotels SET status = COALESCE($1, status), price = COALESCE($2, price), notes = COALESCE($3, notes)
-         WHERE id = $4 RETURNING *`,
-        [status, price, notes, req.params.id]
+        `UPDATE hotels SET
+           status = COALESCE($1, status),
+           price = COALESCE($2, price),
+           notes = COALESCE($3, notes),
+           budget_category_id = COALESCE($4, budget_category_id)
+         WHERE id = $5 RETURNING *`,
+        [status, price, notes, budgetCategoryId, req.params.id]
       );
       res.json(result.rows[0]);
     });

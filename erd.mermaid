@@ -11,6 +11,10 @@ erDiagram
     TRIPS ||--o{ HOTELS : "books"
     TRIPS ||--o{ FLIGHTS : "books"
     TRIPS ||--o{ SAVED_PLACES : "pins on map"
+    BUDGET_CATEGORIES ||--o{ HOTELS : "planned under"
+    BUDGET_CATEGORIES ||--o{ FLIGHTS : "planned under"
+    HOTELS ||--o| EXPENSES : "paid as"
+    FLIGHTS ||--o| EXPENSES : "paid as"
 
     USERS {
         uuid id PK
@@ -59,12 +63,15 @@ erDiagram
         uuid trip_id FK
         uuid budget_category_id FK
         uuid paid_by_user_id FK
+        uuid source_hotel_id FK
+        uuid source_flight_id FK
         numeric amount
         date expense_date
     }
     HOTELS {
         uuid id PK
         uuid trip_id FK
+        uuid budget_category_id FK
         varchar name
         double lat
         double lng
@@ -75,6 +82,7 @@ erDiagram
     FLIGHTS {
         uuid id PK
         uuid trip_id FK
+        uuid budget_category_id FK
         varchar airline
         varchar flight_number
         timestamptz departure_datetime

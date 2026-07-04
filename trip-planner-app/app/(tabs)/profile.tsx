@@ -4,6 +4,7 @@ import { router } from 'expo-router';
 import { clearAuthToken } from '@/api/client';
 import { getMe, type Me } from '@/api/auth';
 import { colors, spacing, radius, cardShadow, fonts, tracking, layout } from '@/theme';
+import { AppHeader } from '@/components/AppHeader';
 
 // Perfil — trae los datos reales del usuario logueado desde /auth/me y
 // aplica la identidad visual "Rumbo" (papel + tinta navy + sello naranja)
@@ -28,8 +29,10 @@ export default function ProfileScreen() {
   const initial = me?.name?.trim()?.[0]?.toUpperCase() ?? '?';
 
   return (
-    <View style={styles.container}>
-      <Text style={styles.eyebrow}>MI CUENTA</Text>
+    <View style={styles.pageRoot}>
+      <AppHeader safeTop />
+      <View style={styles.container}>
+        <Text style={styles.eyebrow}>MI CUENTA</Text>
 
       <View style={styles.card}>
         <View style={styles.avatar}>
@@ -48,14 +51,16 @@ export default function ProfileScreen() {
         )}
       </View>
 
-      <Pressable style={styles.button} onPress={handleLogout}>
-        <Text style={styles.buttonText}>Cerrar sesión</Text>
-      </Pressable>
+        <Pressable style={styles.button} onPress={handleLogout}>
+          <Text style={styles.buttonText}>Cerrar sesión</Text>
+        </Pressable>
+      </View>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
+  pageRoot: { flex: 1, backgroundColor: colors.background },
   container: {
     flex: 1,
     backgroundColor: colors.background,

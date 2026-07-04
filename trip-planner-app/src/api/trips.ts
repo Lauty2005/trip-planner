@@ -73,6 +73,9 @@ export interface SavedHotel {
   price?: number;
   currency?: string;
   status: BookingStatus;
+  // Categoría de presupuesto a la que cae el gasto cuando se marca este
+  // hotel como pagado (tab Gastos) — ver pendingPayments en el dossier.
+  budgetCategoryId?: string;
 }
 
 // Tramo del vuelo dentro del viaje — puramente informativo (agrupar/
@@ -94,17 +97,30 @@ export interface SavedFlight {
   hasLayover: boolean;
   layoverAirport?: string;
   layoverDurationMinutes?: number;
+  layoverFlightNumber?: string;
+  // No se mapeaba antes (nadie la leía) — hace falta para precargar el
+  // form de "Editar vuelo" sin pisar notas ya guardadas con un blank.
+  notes?: string;
+  // Categoría de presupuesto a la que cae el gasto cuando se marca este
+  // vuelo como pagado (tab Gastos) — ver pendingPayments en el dossier.
+  budgetCategoryId?: string;
 }
 
 function mapSavedHotel(r: any): SavedHotel {
   return {
     id: r.id,
     name: r.name,
-    checkInDate: r.check_in_date,
-    checkOutDate: r.check_out_date,
+    // check_in_date/check_out_date son columnas DATE — sin este slice
+    // llegaban como el ISO completo que arma pg al parsearlas ('2026-12-
+    // 24T03:00:00.000Z', con la hora que le puso el driver, no la fecha
+    // que cargó el usuario) y el dossier las mostraba crudas. Mismo
+    // criterio que toDateOnly() en mapTrip.
+    checkInDate: toDateOnly(r.check_in_date),
+    checkOutDate: toDateOnly(r.check_out_date),
     price: r.price != null ? Number(r.price) : undefined,
     currency: r.currency,
     status: r.status,
+    budgetCategoryId: r.budget_category_id ?? undefined,
   };
 }
 
@@ -124,6 +140,9 @@ function mapSavedFlight(r: any): SavedFlight {
     hasLayover: r.has_layover ?? false,
     layoverAirport: r.layover_airport ?? undefined,
     layoverDurationMinutes: r.layover_duration_minutes != null ? Number(r.layover_duration_minutes) : undefined,
+    layoverFlightNumber: r.layover_flight_number ?? undefined,
+    notes: r.notes ?? undefined,
+    budgetCategoryId: r.budget_category_id ?? undefined,
   };
 }
 
@@ -229,31 +248,45 @@ export async function createHotel(
     price?: number;
     currency?: string;
     notes?: string;
+    budgetCategoryId?: string;
   }
 ): Promise<SavedHotel> {
   const { data } = await apiClient.post(`/trips/${tripId}/hotels`, { ...payload, bookingSource: 'manual' });
   return mapSavedHotel(data);
 }
 
-export async function createFlight(
-  tripId: string,
-  payload: {
-    airline?: string;
-    flightNumber?: string;
-    departureAirport?: string;
-    arrivalAirport?: string;
-    departureDatetime: string;
-    arrivalDatetime: string;
-    price?: number;
-    currency?: string;
-    notes?: string;
-    legType?: FlightLegType;
-    hasLayover?: boolean;
-    layoverAirport?: string;
-    layoverDurationMinutes?: number;
-  }
-): Promise<SavedFlight> {
+export interface FlightFormPayload {
+  airline?: string;
+  flightNumber?: string;
+  departureAirport?: string;
+  arrivalAirport?: string;
+  departureDatetime: string;
+  arrivalDatetime: string;
+  price?: number;
+  currency?: string;
+  notes?: string;
+  legType?: FlightLegType;
+  hasLayover?: boolean;
+  // `null` explícito (en vez de simplemente omitir el campo) para poder
+  // limpiar la escala al editar un vuelo que la tenía y ahora no — el PATCH
+  // del backend usa COALESCE por columna, que solo respeta un `null`
+  // explícito para "borrar"; omitir el campo significa "no tocar".
+  layoverAirport?: string | null;
+  layoverDurationMinutes?: number | null;
+  layoverFlightNumber?: string | null;
+  budgetCategoryId?: string;
+}
+
+export async function createFlight(tripId: string, payload: FlightFormPayload): Promise<SavedFlight> {
   const { data } = await apiClient.post(`/trips/${tripId}/flights`, { ...payload, bookingSource: 'manual' });
+  return mapSavedFlight(data);
+}
+
+// Edición de vuelo (botón "Editar" en la tab Vuelos del dossier, 2026-07-04)
+// — el backend ya soporta PATCH /flights/:id con todos los campos (antes
+// solo status/price/notes), sin usar desde el cliente hasta ahora.
+export async function updateFlight(flightId: string, payload: Partial<FlightFormPayload>): Promise<SavedFlight> {
+  const { data } = await apiClient.patch(`/flights/${flightId}`, payload);
   return mapSavedFlight(data);
 }
 

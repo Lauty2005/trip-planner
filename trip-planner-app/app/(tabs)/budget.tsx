@@ -3,6 +3,7 @@ import { View, ActivityIndicator } from 'react-native';
 import { router } from 'expo-router';
 import { useSelectedTripStore } from '@/store/selectedTrip';
 import { colors } from '@/theme';
+import { AppHeader } from '@/components/AppHeader';
 
 // 2026-07-02, a pedido de Lautaro: esta pantalla global de Presupuesto se
 // eliminó — TODA la gestión (categorías, gráfico, "Agregar categoría") se
@@ -29,8 +30,11 @@ export default function BudgetScreenRedirect() {
   }, [selectedTrip]);
 
   return (
-    <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.background }}>
-      <ActivityIndicator color={colors.ink} />
+    <View style={{ flex: 1, backgroundColor: colors.background }}>
+      <AppHeader safeTop />
+      <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center' }}>
+        <ActivityIndicator color={colors.ink} />
+      </View>
     </View>
   );
 }

@@ -21,6 +21,8 @@ function mapExpense(r: any): Expense {
     tripId: r.trip_id,
     budgetCategoryId: r.budget_category_id ?? undefined,
     paidByUserId: r.paid_by_user_id ?? undefined,
+    sourceHotelId: r.source_hotel_id ?? undefined,
+    sourceFlightId: r.source_flight_id ?? undefined,
     description: r.description,
     amount: Number(r.amount),
     currency: r.currency,
@@ -43,7 +45,18 @@ export async function createBudgetCategory(
 
 export async function createExpense(
   tripId: string,
-  payload: { description: string; amount: number; expenseDate: string; budgetCategoryId?: string; currency?: string }
+  payload: {
+    description: string;
+    amount: number;
+    expenseDate: string;
+    budgetCategoryId?: string;
+    currency?: string;
+    // Se mandan al crear el gasto desde "Marcar como pagado" en un
+    // hotel/vuelo pendiente (tab Gastos) — ver pendingPayments en el
+    // dossier. En un registro manual de gasto ninguno de los dos va.
+    sourceHotelId?: string;
+    sourceFlightId?: string;
+  }
 ): Promise<Expense> {
   // `currency` es opcional acá pero SIEMPRE se manda desde las pantallas
   // (budget.tsx / dossier) con la moneda del viaje — antes no se mandaba
@@ -51,6 +64,15 @@ export async function createExpense(
   // moneda estuviera el trip (bug reportado por Lautaro).
   const { data } = await apiClient.post(`/trips/${tripId}/expenses`, payload);
   return mapExpense(data);
+}
+
+// Categorías de presupuesto del viaje (solo id + nombre) — se usa en el
+// form de Reservas (hotel/vuelo) para elegir a qué categoría cae el gasto
+// cuando se lo marque como pagado. Reusa el endpoint de resumen en vez de
+// pedir uno nuevo al backend: no hace falta planned/spent acá.
+export async function getBudgetCategoryOptions(tripId: string): Promise<{ id: string; name: string }[]> {
+  const summary = await getBudgetSummary(tripId);
+  return summary.categories.map((c) => ({ id: c.category_id, name: c.name }));
 }
 
 // Lista de gastos individuales — antes solo se veía el agregado por

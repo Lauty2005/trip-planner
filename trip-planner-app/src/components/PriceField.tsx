@@ -108,6 +108,11 @@ export function PriceField({
 }
 
 const styles = StyleSheet.create({
+  // minHeight: mismo fix que Field/SelectField/DatePickerField/TimePickerField
+  // (ver comentario en app/(tabs)/explore.tsx) — reserva 2 líneas de alto
+  // aunque el label entre en una sola, para que el fieldBox de este campo
+  // arranque a la misma altura que el de al lado en una fieldRow, sin
+  // importar cuál de los dos labels es más largo.
   fieldLabel: {
     fontFamily: fonts.mono,
     fontSize: 10.5,
@@ -115,6 +120,7 @@ const styles = StyleSheet.create({
     color: colors.muted,
     marginBottom: 4,
     marginLeft: 2,
+    minHeight: 28,
   },
   fieldBox: {
     flexDirection: 'row',
@@ -124,7 +130,11 @@ const styles = StyleSheet.create({
     borderColor: colors.line,
     borderRadius: radius.lg,
     paddingHorizontal: 12,
+    // paddingVertical en la caja, no en el TextInput — ver comentario en
+    // app/(tabs)/explore.tsx (mismo fix de alineación, es el mismo bug de
+    // altura entre <TextInput> y <Text>+Pressable en react-native-web).
+    paddingVertical: 12,
   },
   fieldGlyph: { fontSize: 16, marginRight: 8 },
-  fieldInput: { flex: 1, fontSize: 16, color: colors.ink, paddingVertical: 12 },
+  fieldInput: { flex: 1, fontSize: 16, color: colors.ink },
 });

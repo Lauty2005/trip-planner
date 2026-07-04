@@ -39,11 +39,14 @@ router.get('/trips/:tripId/expenses', requireTripAccess('viewer'), async (req, r
 
 router.post('/trips/:tripId/expenses', requireTripAccess('editor'), validateBody(expenseCreateSchema), async (req, res, next) => {
   try {
-    const { budgetCategoryId, description, amount, currency = 'USD', expenseDate } = req.body;
+    const { budgetCategoryId, description, amount, currency = 'USD', expenseDate, sourceHotelId, sourceFlightId } = req.body;
     const result = await pool.query(
-      `INSERT INTO expenses (trip_id, budget_category_id, paid_by_user_id, description, amount, currency, expense_date)
-       VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *`,
-      [req.params.tripId, budgetCategoryId ?? null, req.user!.userId, description, amount, currency, expenseDate]
+      `INSERT INTO expenses (trip_id, budget_category_id, paid_by_user_id, description, amount, currency, expense_date, source_hotel_id, source_flight_id)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`,
+      [
+        req.params.tripId, budgetCategoryId ?? null, req.user!.userId, description, amount, currency, expenseDate,
+        sourceHotelId ?? null, sourceFlightId ?? null,
+      ]
     );
     res.status(201).json(result.rows[0]);
   } catch (err) {

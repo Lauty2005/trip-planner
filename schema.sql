@@ -124,18 +124,32 @@ CREATE TABLE expenses (
     trip_id             UUID NOT NULL REFERENCES trips(id) ON DELETE CASCADE,
     budget_category_id  UUID REFERENCES budget_categories(id) ON DELETE SET NULL,
     paid_by_user_id     UUID REFERENCES users(id) ON DELETE SET NULL,
+    -- Si este gasto se generó desde "Marcar como pagado" en un hotel/vuelo
+    -- guardado (tab Gastos), acá queda la referencia — a lo sumo una de
+    -- las dos, nunca ambas (ver chk_expenses_single_source). Sirve para que
+    -- el dossier sepa qué hoteles/vuelos con precio todavía NO se pasaron
+    -- a gastos (pendientes de pago) y no los repita en esa lista.
+    -- Sin REFERENCES inline: hotels/flights se crean más abajo en este
+    -- mismo archivo, y CREATE TABLE no puede apuntar "hacia adelante" a una
+    -- tabla que todavía no existe — el FK real se agrega con ALTER TABLE
+    -- después de crear hotels/flights (ver más abajo).
+    source_hotel_id     UUID,
+    source_flight_id    UUID,
     description         VARCHAR(200) NOT NULL,
     amount              NUMERIC(10, 2) NOT NULL CHECK (amount >= 0),
     currency            CHAR(3) NOT NULL DEFAULT 'USD',
     expense_date        DATE NOT NULL,
     created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
-    CONSTRAINT chk_expenses_currency_format CHECK (currency ~ '^[A-Z]{3}$')
+    CONSTRAINT chk_expenses_currency_format CHECK (currency ~ '^[A-Z]{3}$'),
+    CONSTRAINT chk_expenses_single_source CHECK (source_hotel_id IS NULL OR source_flight_id IS NULL)
 );
 
 CREATE INDEX idx_expenses_trip ON expenses(trip_id);
 CREATE INDEX idx_expenses_category ON expenses(budget_category_id);
 CREATE INDEX idx_expenses_paid_by ON expenses(paid_by_user_id);
+CREATE INDEX idx_expenses_source_hotel ON expenses(source_hotel_id);
+CREATE INDEX idx_expenses_source_flight ON expenses(source_flight_id);
 
 -- ---------------------------------------------------------------------
 -- HOTELS (hospedajes reservados o candidatos)
@@ -151,6 +165,10 @@ CREATE TABLE hotels (
     check_out_date      DATE NOT NULL,
     price               NUMERIC(10, 2) CHECK (price >= 0),
     currency            CHAR(3) NOT NULL DEFAULT 'USD',
+    -- Categoría de presupuesto a la que se le va a cargar el gasto cuando
+    -- se marque como pagado (tab Gastos) — puramente informativo hasta
+    -- ese momento, no afecta "planificado vs gastado" por sí solo.
+    budget_category_id  UUID REFERENCES budget_categories(id) ON DELETE SET NULL,
     confirmation_number VARCHAR(100),
     booking_source      VARCHAR(50), -- ej: 'amadeus', 'booking.com', 'manual'
     external_offer_id   VARCHAR(150), -- id devuelto por Amadeus, si aplica
@@ -166,6 +184,7 @@ CREATE TABLE hotels (
 );
 
 CREATE INDEX idx_hotels_trip ON hotels(trip_id);
+CREATE INDEX idx_hotels_budget_category ON hotels(budget_category_id);
 
 -- ---------------------------------------------------------------------
 -- FLIGHTS (vuelos reservados o candidatos)
@@ -190,8 +209,12 @@ CREATE TABLE flights (
     has_layover           BOOLEAN NOT NULL DEFAULT false,
     layover_airport       VARCHAR(10),
     layover_duration_minutes INTEGER,
+    layover_flight_number VARCHAR(20), -- N° de vuelo del tramo de la escala, si aplica
     price                 NUMERIC(10, 2) CHECK (price >= 0),
     currency              CHAR(3) NOT NULL DEFAULT 'USD',
+    -- Ver mismo campo en hotels: categoría a la que cae el gasto cuando se
+    -- marca este vuelo como pagado (tab Gastos).
+    budget_category_id    UUID REFERENCES budget_categories(id) ON DELETE SET NULL,
     confirmation_number   VARCHAR(100),
     booking_source        VARCHAR(50),
     external_offer_id     VARCHAR(150), -- id devuelto por Amadeus, si aplica
@@ -205,6 +228,14 @@ CREATE TABLE flights (
 );
 
 CREATE INDEX idx_flights_trip ON flights(trip_id);
+CREATE INDEX idx_flights_budget_category ON flights(budget_category_id);
+
+-- expenses.source_hotel_id/source_flight_id apuntan acá y a flights, pero
+-- expenses se crea más arriba en este archivo (antes de que existan estas
+-- tablas) — el FK se agrega ahora que hotels/flights ya existen.
+ALTER TABLE expenses
+    ADD CONSTRAINT fk_expenses_source_hotel FOREIGN KEY (source_hotel_id) REFERENCES hotels(id) ON DELETE SET NULL,
+    ADD CONSTRAINT fk_expenses_source_flight FOREIGN KEY (source_flight_id) REFERENCES flights(id) ON DELETE SET NULL;
 
 -- ---------------------------------------------------------------------
 -- SAVED_PLACES (pines libres en el mapa: miradores, restaurantes, etc.
