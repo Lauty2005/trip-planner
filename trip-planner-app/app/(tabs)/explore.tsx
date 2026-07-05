@@ -3,17 +3,22 @@ import { View, Text, TextInput, Pressable, ScrollView, StyleSheet } from 'react-
 import { router } from 'expo-router';
 import {
   createHotel,
+  updateHotel,
   createFlight,
   updateFlight,
   estimateFlightArrival,
+  lookupFlight,
   type FlightLegType,
   type FlightEstimate,
   type FlightFormPayload,
+  type HotelFormPayload,
   type SavedFlight,
+  type SavedHotel,
 } from '@/api/trips';
 import { getBudgetCategoryOptions } from '@/api/budget';
 import { useSelectedTripStore } from '@/store/selectedTrip';
 import { useEditFlightStore } from '@/store/editFlight';
+import { useEditHotelStore } from '@/store/editHotel';
 import { DatePickerField } from '@/components/DatePickerField';
 import { SelectField } from '@/components/SelectField';
 import { TimePickerField } from '@/components/TimePickerField';
@@ -91,6 +96,8 @@ export default function ExploreScreen() {
   const selectedTrip = useSelectedTripStore((state) => state.selectedTrip);
   const editFlight = useEditFlightStore((state) => state.editFlight);
   const clearEditFlight = useEditFlightStore((state) => state.clearEditFlight);
+  const editHotel = useEditHotelStore((state) => state.editHotel);
+  const clearEditHotel = useEditHotelStore((state) => state.clearEditHotel);
 
   // Categorías de presupuesto del viaje, para poder elegir a cuál cae el
   // gasto cuando el hotel/vuelo se marque como pagado (tab Gastos del
@@ -123,6 +130,10 @@ export default function ExploreScreen() {
   const [hotelCurrency, setHotelCurrency] = useState('');
   const [hotelNotes, setHotelNotes] = useState('');
   const [hotelBudgetCategoryId, setHotelBudgetCategoryId] = useState('');
+  // Si no es null, "Guardar hotel" actualiza este hotel (PATCH) en vez de
+  // crear uno nuevo — lo setea loadHotelForEdit cuando se entra acá desde
+  // el botón "✎" del dossier (ver useEditHotelStore).
+  const [editingHotelId, setEditingHotelId] = useState<string | null>(null);
 
   // Vuelo
   const [legType, setLegType] = useState<FlightLegType>('one_way');
@@ -156,6 +167,14 @@ export default function ExploreScreen() {
   // crear uno nuevo — lo setea loadFlightForEdit cuando se entra acá desde
   // el botón "Editar" del dossier (ver useEditFlightStore).
   const [editingFlightId, setEditingFlightId] = useState<string | null>(null);
+
+  // "Buscar vuelo" (2026-07-07) — autocompleta origen/destino/horarios a
+  // partir de N° de vuelo + fecha de salida, vía AeroDataBox (services/
+  // aerodatabox.ts en el backend). No pisa nada del formulario hasta que
+  // la búsqueda resuelve con éxito.
+  const [lookingUpFlight, setLookingUpFlight] = useState(false);
+  const [lookupError, setLookupError] = useState<string | null>(null);
+  const [lookupNote, setLookupNote] = useState<string | null>(null);
 
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -218,6 +237,28 @@ export default function ExploreScreen() {
     setHotelCurrency('');
     setHotelNotes('');
     setHotelBudgetCategoryId('');
+    setEditingHotelId(null);
+  }
+
+  // Precarga el form con un hotel ya guardado (botón "✎" en el dossier, vía
+  // useEditHotelStore) — mismo patrón que loadFlightForEdit.
+  function loadHotelForEdit(hotel: SavedHotel) {
+    setMode('hotels');
+    setEditingHotelId(hotel.id);
+    setHotelName(hotel.name);
+    setHotelAddress(hotel.address ?? '');
+    setCheckIn(hotel.checkInDate ?? '');
+    setCheckOut(hotel.checkOutDate ?? '');
+    setHotelPrice(hotel.price);
+    setHotelCurrency(hotel.currency ?? '');
+    setHotelNotes(hotel.notes ?? '');
+    setHotelBudgetCategoryId(hotel.budgetCategoryId ?? '');
+    setError(null);
+    setSavedLabel(null);
+  }
+
+  function cancelEditHotel() {
+    resetHotelForm();
   }
 
   function resetFlightForm() {
@@ -298,6 +339,14 @@ export default function ExploreScreen() {
     clearEditFlight();
   }, [editFlight]);
 
+  // Mismo mecanismo para el botón "✎" de un hotel guardado (handleEditHotel
+  // en app/trip/[tripId]/index.tsx setea editHotel antes de navegar acá).
+  useEffect(() => {
+    if (!editHotel) return;
+    loadHotelForEdit(editHotel);
+    clearEditHotel();
+  }, [editHotel]);
+
   function handleSwapAirports() {
     setDepartureAirport(arrivalAirport);
     setArrivalAirport(departureAirport);
@@ -331,6 +380,59 @@ export default function ExploreScreen() {
     }
   }
 
+  // "Buscar vuelo" — autocompleta origen/destino/horarios reales a partir
+  // del N° de vuelo + fecha de salida (vía AeroDataBox). A diferencia de la
+  // estimación automática de más arriba (geocoding + distancia, aproximada),
+  // esto trae el horario REAL si el vuelo existe para esa fecha — por eso
+  // fija manualArrival=true en vez de dejar que la estimación lo pise.
+  async function handleLookupFlight() {
+    setLookupError(null);
+    setLookupNote(null);
+    if (!flightNumber.trim()) {
+      setLookupError('Completá el número de vuelo primero.');
+      return;
+    }
+    if (!departDate) {
+      setLookupError('Completá la fecha de salida primero (más arriba).');
+      return;
+    }
+    setLookingUpFlight(true);
+    try {
+      const results = await lookupFlight(flightNumber.trim(), departDate);
+      if (results.length === 0) {
+        setLookupError('No se encontró ese vuelo para esa fecha.');
+        return;
+      }
+      const match = results[0];
+      if (match.departureAirport) setDepartureAirport(match.departureAirport);
+      if (match.arrivalAirport) setArrivalAirport(match.arrivalAirport);
+      if (match.departureDatetime) {
+        const dep = splitDatetime(match.departureDatetime);
+        setDepartDate(dep.date);
+        setDepartTime(dep.time);
+      }
+      if (match.arrivalDatetime) {
+        const arr = splitDatetime(match.arrivalDatetime);
+        setArriveDate(arr.date);
+        setArriveTime(arr.time);
+        setManualArrival(true);
+      }
+      if (match.airline && AIRLINES.includes(match.airline)) setAirline(match.airline);
+      setLookupNote(
+        `✓ ${match.departureAirport ?? '???'} → ${match.arrivalAirport ?? '???'}` +
+          (results.length > 1 ? ` · se encontraron ${results.length} coincidencias, se usó la primera` : '')
+      );
+    } catch (err: any) {
+      if (err?.response?.status === 503) {
+        setLookupError('Falta configurar la key de AeroDataBox en el backend (ver .env.example).');
+      } else {
+        setLookupError('No se pudo buscar el vuelo. Revisá tu conexión.');
+      }
+    } finally {
+      setLookingUpFlight(false);
+    }
+  }
+
   async function handleSaveHotel() {
     if (!selectedTrip) return;
     if (!hotelName.trim() || !checkIn || !checkOut) {
@@ -344,7 +446,7 @@ export default function ExploreScreen() {
     setError(null);
     setSaving(true);
     try {
-      await createHotel(selectedTrip.id, {
+      const payload: HotelFormPayload = {
         name: hotelName.trim(),
         address: hotelAddress.trim() || undefined,
         checkInDate: checkIn,
@@ -353,7 +455,12 @@ export default function ExploreScreen() {
         currency: hotelCurrency || selectedTrip.currency,
         notes: hotelNotes.trim() || undefined,
         budgetCategoryId: hotelBudgetCategoryId || undefined,
-      });
+      };
+      if (editingHotelId) {
+        await updateHotel(editingHotelId, payload);
+      } else {
+        await createHotel(selectedTrip.id, payload);
+      }
       setSavedLabel(hotelName.trim());
       resetHotelForm();
     } catch (err: any) {
@@ -498,6 +605,14 @@ export default function ExploreScreen() {
       <View style={styles.form}>
         {mode === 'hotels' ? (
           <>
+            {editingHotelId ? (
+              <View style={styles.editingBanner}>
+                <Text style={styles.editingBannerText}>✎ Editando hotel guardado</Text>
+                <Pressable onPress={cancelEditHotel}>
+                  <Text style={styles.editingBannerLink}>Cancelar edición</Text>
+                </Pressable>
+              </View>
+            ) : null}
             <Field glyph="🏨" label="Nombre del hotel" placeholder="Ej: Hotel Central" value={hotelName} onChangeText={setHotelName} />
             <Field glyph="📍" label="Dirección (opcional)" placeholder="Calle y número, ciudad" value={hotelAddress} onChangeText={setHotelAddress} />
             <View style={styles.fieldRow}>
@@ -550,7 +665,9 @@ export default function ExploreScreen() {
               onPress={handleSaveHotel}
               disabled={!selectedTrip || saving}
             >
-              <Text style={styles.saveButtonText}>{saving ? 'Guardando...' : '＋ Guardar hotel'}</Text>
+              <Text style={styles.saveButtonText}>
+                {saving ? 'Guardando...' : editingHotelId ? '✓ Guardar cambios' : '＋ Guardar hotel'}
+              </Text>
             </Pressable>
           </>
         ) : (
@@ -714,6 +831,18 @@ export default function ExploreScreen() {
                 <Field glyph="#️⃣" label="N° de vuelo (opcional)" placeholder="Ej: AR1234" value={flightNumber} onChangeText={setFlightNumber} autoCapitalize="characters" />
               </View>
             </View>
+
+            {/* Autocompleta origen/destino/horarios reales a partir del N°
+                de vuelo + la fecha de salida cargada más arriba — usa
+                AeroDataBox server-side (2026-07-07). Requiere que el
+                backend tenga AERODATABOX_RAPIDAPI_KEY configurada. */}
+            <Pressable onPress={handleLookupFlight} disabled={lookingUpFlight}>
+              <Text style={styles.estimateLink}>
+                {lookingUpFlight ? 'Buscando...' : '🔎 Buscar vuelo y autocompletar'}
+              </Text>
+            </Pressable>
+            {lookupError ? <Text style={styles.estimateError}>{lookupError}</Text> : null}
+            {lookupNote ? <Text style={styles.estimateText}>{lookupNote}</Text> : null}
 
             <View style={styles.fieldRow}>
               <View style={styles.fieldRowItem}>

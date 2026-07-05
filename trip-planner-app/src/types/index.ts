@@ -64,11 +64,19 @@ export interface BudgetCategory {
   plannedAmount: number;
 }
 
+// Persona incluida en la división de un gasto (ver expense_splits en
+// schema.sql) — partes iguales entre quienes aparecen acá.
+export interface ExpenseSplit {
+  userId: string;
+  name: string;
+}
+
 export interface Expense {
   id: string;
   tripId: string;
   budgetCategoryId?: string;
   paidByUserId?: string;
+  paidByName?: string;
   // Si este gasto se generó desde "Marcar como pagado" en un hotel/vuelo
   // guardado (tab Gastos), a lo sumo uno de los dos queda seteado.
   sourceHotelId?: string;
@@ -77,6 +85,9 @@ export interface Expense {
   amount: number;
   currency: string;
   expenseDate: string;
+  // Vacío = gasto no dividido (no entra en el cálculo de balances, ver
+  // src/utils/splitBalances.ts).
+  splits: ExpenseSplit[];
 }
 
 export interface Hotel {

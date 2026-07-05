@@ -10,6 +10,7 @@ import budgetRoutes from './routes/budget.routes.js';
 import expensesRoutes from './routes/expenses.routes.js';
 import hotelsRoutes from './routes/hotels.routes.js';
 import flightsRoutes from './routes/flights.routes.js';
+import bookingSharesRoutes from './routes/bookingShares.routes.js';
 import placesRoutes from './routes/places.routes.js';
 import mapRoutes from './routes/map.routes.js';
 import locationsRoutes from './routes/locations.routes.js';
@@ -29,6 +30,7 @@ v1.use('/', budgetRoutes);        // /trips/:tripId/budget-categories, /budget-c
 v1.use('/', expensesRoutes);      // /trips/:tripId/expenses, /expenses/:id, /budget/summary
 v1.use('/', hotelsRoutes);
 v1.use('/', flightsRoutes);
+v1.use('/', bookingSharesRoutes);  // /booking-shares/:id/pay
 v1.use('/', placesRoutes);
 v1.use('/', mapRoutes);
 v1.use('/', locationsRoutes);

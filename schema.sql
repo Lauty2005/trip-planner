@@ -152,6 +152,22 @@ CREATE INDEX idx_expenses_source_hotel ON expenses(source_hotel_id);
 CREATE INDEX idx_expenses_source_flight ON expenses(source_flight_id);
 
 -- ---------------------------------------------------------------------
+-- EXPENSE_SPLITS (entre quiénes se divide un gasto — división en partes
+-- iguales entre los que están acá; sin fila propia = gasto no dividido,
+-- no entra en el cálculo de balances de la tab Gastos).
+-- ---------------------------------------------------------------------
+CREATE TABLE expense_splits (
+    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    expense_id  UUID NOT NULL REFERENCES expenses(id) ON DELETE CASCADE,
+    user_id     UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (expense_id, user_id)
+);
+
+CREATE INDEX idx_expense_splits_expense ON expense_splits(expense_id);
+CREATE INDEX idx_expense_splits_user ON expense_splits(user_id);
+
+-- ---------------------------------------------------------------------
 -- HOTELS (hospedajes reservados o candidatos)
 -- ---------------------------------------------------------------------
 CREATE TABLE hotels (
@@ -236,6 +252,43 @@ CREATE INDEX idx_flights_budget_category ON flights(budget_category_id);
 ALTER TABLE expenses
     ADD CONSTRAINT fk_expenses_source_hotel FOREIGN KEY (source_hotel_id) REFERENCES hotels(id) ON DELETE SET NULL,
     ADD CONSTRAINT fk_expenses_source_flight FOREIGN KEY (source_flight_id) REFERENCES flights(id) ON DELETE SET NULL;
+
+-- ---------------------------------------------------------------------
+-- BOOKING_SHARES (2026-07-06, a pedido de Lautaro: reparto de un hotel o
+-- vuelo COMPARTIDO entre varios viajeros, cada uno con su propio monto y
+-- su propia fecha de pago — a diferencia de expense_splits, que reparte
+-- un GASTO ya pagado en partes iguales, acá el monto por persona puede
+-- ser distinto y todavía no hay gasto: existe desde que alguien arma el
+-- reparto en la tarjeta del hotel/vuelo, y recién se vuelve un `expenses`
+-- real cuando ESA persona puntual marca que ya pagó su parte (ver
+-- POST /booking-shares/:id/pay). Reservas separadas por persona (cada
+-- quien con su propio hotel/vuelo, sin nada compartido) NO necesitan
+-- esto: alcanza con cargar una fila de hotels/flights por persona, como
+-- ya se podía hacer antes.
+-- ---------------------------------------------------------------------
+CREATE TABLE booking_shares (
+    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    -- Pertenece a un hotel O a un vuelo, nunca ambos ni ninguno (ver
+    -- chk_booking_shares_one_parent).
+    hotel_id    UUID REFERENCES hotels(id) ON DELETE CASCADE,
+    flight_id   UUID REFERENCES flights(id) ON DELETE CASCADE,
+    user_id     UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    amount      NUMERIC(10, 2) NOT NULL CHECK (amount >= 0),
+    -- NULL = todavía no pagó su parte. Se completa (y ya no se vuelve a
+    -- tocar desde el reparto) cuando esta persona hace "Marcar pagado" en
+    -- la tab Gastos — ON DELETE SET NULL: si se borra ese gasto puntual
+    -- desde Gastos, el reparto vuelve solo a estado "pendiente".
+    expense_id  UUID REFERENCES expenses(id) ON DELETE SET NULL,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT chk_booking_shares_one_parent CHECK ((hotel_id IS NOT NULL) <> (flight_id IS NOT NULL))
+);
+
+-- Un viajero no puede tener dos filas de reparto para el mismo hotel/vuelo
+-- (parciales: solo aplican a las filas que sí son de ese tipo, por eso el
+-- WHERE — con columnas NULL un UNIQUE normal no lo garantiza).
+CREATE UNIQUE INDEX idx_booking_shares_hotel_user ON booking_shares(hotel_id, user_id) WHERE hotel_id IS NOT NULL;
+CREATE UNIQUE INDEX idx_booking_shares_flight_user ON booking_shares(flight_id, user_id) WHERE flight_id IS NOT NULL;
+CREATE INDEX idx_booking_shares_expense ON booking_shares(expense_id);
 
 -- ---------------------------------------------------------------------
 -- SAVED_PLACES (pines libres en el mapa: miradores, restaurantes, etc.

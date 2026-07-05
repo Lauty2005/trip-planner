@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import {
   View,
   Text,
@@ -24,9 +24,13 @@ import {
   deleteActivity,
   deleteHotel,
   deleteFlight,
+  updateHotelShares,
+  updateFlightShares,
+  payBookingShare,
   type SavedHotel,
   type SavedFlight,
   type FlightLegType,
+  type BookingShare,
 } from '@/api/trips';
 import {
   getBudgetSummary,
@@ -38,6 +42,14 @@ import {
   deleteExpense,
   type BudgetSummary,
 } from '@/api/budget';
+import {
+  getTripParticipants,
+  addCollaborator,
+  removeCollaborator,
+  type Participant,
+} from '@/api/collaborators';
+import { getMe } from '@/api/auth';
+import { computeBalances, simplifyDebts } from '@/utils/splitBalances';
 // 2026-07-02: antes esto se importaba desde '../../(tabs)/budget' (ruta
 // relativa porque el alias @/* solo cubre src/*, ver tsconfig.json) — al
 // mover TODA la gestión de presupuesto (categorías, gráfico, "Agregar
@@ -48,6 +60,7 @@ import { CATEGORY_COLORS, categoryGlyph } from '@/utils/budgetDisplay';
 import { formatShort } from '@/utils/date';
 import { useSelectedTripStore } from '@/store/selectedTrip';
 import { useEditFlightStore } from '@/store/editFlight';
+import { useEditHotelStore } from '@/store/editHotel';
 import type { Trip, ItineraryDay, Activity, ActivityCategory, TripStatus, MapPin, Expense } from '@/types';
 import { DatePickerField } from '@/components/DatePickerField';
 import { TimePickerField } from '@/components/TimePickerField';
@@ -62,7 +75,7 @@ import { colors, spacing, radius, cardShadow, fonts, tracking, layout } from '@/
 // y categorías de presupuesto comparten el mismo modal (ConfirmDeleteModal)
 // en vez de uno por tipo, así que solo hace falta un state genérico acá.
 type DeleteTarget = {
-  type: 'activity' | 'hotel' | 'flight' | 'category' | 'expense';
+  type: 'activity' | 'hotel' | 'flight' | 'category' | 'expense' | 'collaborator';
   id: string;
   name: string;
 };
@@ -77,6 +90,11 @@ const DELETE_COPY: Record<DeleteTarget['type'], { title: string; noun: string; e
     extra: ' Los gastos que ya cargaste con esta categoría no se borran, quedan sin categoría asignada.',
   },
   expense: { title: '¿Eliminar este gasto?', noun: 'el gasto' },
+  collaborator: {
+    title: '¿Sacar a este colaborador?',
+    noun: 'a este colaborador',
+    extra: ' Deja de tener acceso al viaje. Los gastos ya divididos con esta persona no se borran.',
+  },
 };
 
 // Dossier de viaje — rediseño 2026-07-01 "idéntico" al boceto de
@@ -123,7 +141,10 @@ function todayISO(): string {
 
 // Hotel/vuelo con precio cargado que todavía no se pasó a un gasto real
 // (tab Gastos, sección "Pendientes de pago") — ver pendingPayments más
-// abajo y source_hotel_id/source_flight_id en expenses.
+// abajo y source_hotel_id/source_flight_id en expenses. Si `shares` no está
+// vacío, el hotel/vuelo es COMPARTIDO con reparto armado (ver tabs Hoteles/
+// Vuelos): la fila se muestra desglosada por persona en vez del botón
+// único "Marcar pagado".
 interface PendingPayment {
   id: string;
   type: 'hotel' | 'flight';
@@ -131,6 +152,7 @@ interface PendingPayment {
   price: number;
   currency: string;
   budgetCategoryId?: string;
+  shares: BookingShare[];
 }
 
 function minutesToHM(mins: number): string {
@@ -162,9 +184,11 @@ const BASE_TABS = [
   { key: 'itin', label: 'Itinerario' },
   { key: 'budget', label: 'Presupuesto' },
   { key: 'expenses', label: 'Gastos' },
+  { key: 'balances', label: 'Balances' },
   { key: 'hotels', label: 'Hoteles' },
   { key: 'flights', label: 'Vuelos' },
   { key: 'map', label: 'Mapa' },
+  { key: 'collab', label: 'Colaboradores' },
 ] as const;
 type TabKey = (typeof BASE_TABS)[number]['key'];
 
@@ -176,6 +200,7 @@ export default function TripDetailScreen() {
   const { tripId } = useLocalSearchParams<{ tripId: string }>();
   const setSelectedTrip = useSelectedTripStore((state) => state.setSelectedTrip);
   const setEditFlight = useEditFlightStore((state) => state.setEditFlight);
+  const setEditHotel = useEditHotelStore((state) => state.setEditHotel);
 
   const [trip, setTrip] = useState<Trip | null>(null);
   const [days, setDays] = useState<ItineraryDay[]>([]);
@@ -184,6 +209,15 @@ export default function TripDetailScreen() {
   const [pins, setPins] = useState<MapPin[]>([]);
   const [budget, setBudget] = useState<BudgetSummary | null>(null);
   const [expenses, setExpenses] = useState<Expense[]>([]);
+  // Dueño + colaboradores del viaje — quiénes pueden pagar/dividir un
+  // gasto (tab Gastos/Balances) y a quiénes se les puede sacar acceso
+  // (tab Colaboradores). currentUserId sirve para: default de "pagado
+  // por" en un gasto nuevo, y para mostrar los controles de invitar/sacar
+  // colaboradores solo si el usuario logueado es el dueño del viaje
+  // (el backend ya lo exige, esto es solo para no mostrar botones que van
+  // a tirar 403).
+  const [participants, setParticipants] = useState<Participant[]>([]);
+  const [currentUserId, setCurrentUserId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -224,6 +258,12 @@ export default function TripDetailScreen() {
   const [expenseAmount, setExpenseAmount] = useState<number | undefined>(undefined);
   const [expenseDate, setExpenseDate] = useState('');
   const [expenseCategoryId, setExpenseCategoryId] = useState('');
+  // "Pagado por" (default: usuario logueado) y "dividir entre" (default:
+  // todos los participantes) — división en partes iguales, ver
+  // src/utils/splitBalances.ts. Vaciar splitParticipantIds = gasto no
+  // dividido (no entra en Balances).
+  const [expensePaidBy, setExpensePaidBy] = useState('');
+  const [splitParticipantIds, setSplitParticipantIds] = useState<string[]>([]);
   const [editingExpenseId, setEditingExpenseId] = useState<string | null>(null);
   const [savingExpense, setSavingExpense] = useState(false);
   const [expenseFormError, setExpenseFormError] = useState<string | null>(null);
@@ -232,17 +272,39 @@ export default function TripDetailScreen() {
   const [markingPaidId, setMarkingPaidId] = useState<string | null>(null);
   const [pendingPaymentError, setPendingPaymentError] = useState<string | null>(null);
 
+  // --- Reparto de hotel/vuelo compartido entre viajeros (tabs Hoteles/
+  // Vuelos, 2026-07-06) — shareDrafts es el monto en edición por
+  // participante (userId → string), sin guardar hasta "Guardar reparto".
+  const [editingSharesFor, setEditingSharesFor] = useState<{ type: 'hotel' | 'flight'; id: string } | null>(null);
+  const [shareDrafts, setShareDrafts] = useState<Record<string, string>>({});
+  const [savingShares, setSavingShares] = useState(false);
+  const [sharesError, setSharesError] = useState<string | null>(null);
+
+  // --- Pago individual de un reparto (tab Gastos, Pendientes de pago) ---
+  const [payingShareId, setPayingShareId] = useState<string | null>(null);
+  const [shareDates, setShareDates] = useState<Record<string, string>>({});
+  const [sharePayError, setSharePayError] = useState<string | null>(null);
+
+  // --- Form: invitar colaborador (tab Colaboradores) ---
+  const [collabEmail, setCollabEmail] = useState('');
+  const [collabRole, setCollabRole] = useState<'editor' | 'viewer'>('editor');
+  const [savingCollab, setSavingCollab] = useState(false);
+  const [collabError, setCollabError] = useState<string | null>(null);
+
   const load = useCallback(async () => {
     try {
-      const [tripData, daysData, hotelsData, flightsData, pinsData, budgetData, expensesData] = await Promise.all([
-        getTrip(tripId),
-        getTripDays(tripId),
-        getTripHotels(tripId),
-        getTripFlights(tripId),
-        getTripMapPins(tripId),
-        getBudgetSummary(tripId),
-        getExpenses(tripId),
-      ]);
+      const [tripData, daysData, hotelsData, flightsData, pinsData, budgetData, expensesData, participantsData, me] =
+        await Promise.all([
+          getTrip(tripId),
+          getTripDays(tripId),
+          getTripHotels(tripId),
+          getTripFlights(tripId),
+          getTripMapPins(tripId),
+          getBudgetSummary(tripId),
+          getExpenses(tripId),
+          getTripParticipants(tripId),
+          getMe(),
+        ]);
       setTrip(tripData);
       setDays(daysData);
       setHotels(hotelsData);
@@ -250,6 +312,8 @@ export default function TripDetailScreen() {
       setPins(pinsData);
       setBudget(budgetData);
       setExpenses(expensesData);
+      setParticipants(participantsData);
+      setCurrentUserId(me.id);
       setError(null);
       setSelectedDayId((prev) =>
         prev && daysData.some((d) => d.id === prev) ? prev : (daysData[0]?.id ?? null)
@@ -280,6 +344,20 @@ export default function TripDetailScreen() {
     await load();
     setRefreshing(false);
   }
+
+  // Precarga "pagado por"/"dividir entre" con sus defaults apenas
+  // participants/currentUserId están disponibles (primera carga del
+  // dossier) — sin esto, el form de "+ Registrar gasto" arrancaba con
+  // ambos campos vacíos hasta la primera vez que se guardaba o cancelaba
+  // algo (que es cuando resetExpenseForm los toca). No pisa nada si ya
+  // hay una edición en curso o el usuario ya interactuó con el form.
+  useEffect(() => {
+    if (editingExpenseId) return;
+    if (expensePaidBy || splitParticipantIds.length > 0) return;
+    if (!currentUserId || participants.length === 0) return;
+    setExpensePaidBy(currentUserId);
+    setSplitParticipantIds(participants.map((p) => p.userId));
+  }, [currentUserId, participants, editingExpenseId, expensePaidBy, splitParticipantIds.length]);
 
   async function handleShare() {
     if (!trip) return;
@@ -322,6 +400,10 @@ export default function TripDetailScreen() {
       else if (deleteTarget.type === 'expense') {
         await deleteExpense(deleteTarget.id);
         if (editingExpenseId === deleteTarget.id) resetExpenseForm();
+      } else if (deleteTarget.type === 'collaborator') {
+        // deleteTarget.id guarda el userId acá (no hay un id de fila propio
+        // que el front necesite — el backend borra por trip_id+user_id).
+        await removeCollaborator(tripId, deleteTarget.id);
       } else await deleteBudgetCategory(deleteTarget.id);
       setDeleteTarget(null);
       await load();
@@ -360,6 +442,15 @@ export default function TripDetailScreen() {
   function handleEditFlight(flight: SavedFlight) {
     if (trip) setSelectedTrip(trip);
     setEditFlight(flight);
+    router.push('/(tabs)/explore');
+  }
+
+  // Botón "✎" en la tab Hoteles (2026-07-06, a pedido de Lautaro) — mismo
+  // mecanismo que handleEditFlight: reusa el form de Reservas, dejando el
+  // hotel en useEditHotelStore para que explore.tsx lo precargue apenas monta.
+  function handleEditHotel(hotel: SavedHotel) {
+    if (trip) setSelectedTrip(trip);
+    setEditHotel(hotel);
     router.push('/(tabs)/explore');
   }
 
@@ -420,6 +511,11 @@ export default function TripDetailScreen() {
     setExpenseAmount(undefined);
     setExpenseDate('');
     setExpenseCategoryId('');
+    // Default para un gasto nuevo: lo pagaste vos, dividido entre todos
+    // los participantes actuales del viaje — lo más común en un viaje
+    // grupal. Se puede destildar a mano si no corresponde dividirlo.
+    setExpensePaidBy(currentUserId ?? '');
+    setSplitParticipantIds(participants.map((p) => p.userId));
     setEditingExpenseId(null);
     setExpenseFormError(null);
   }
@@ -430,7 +526,18 @@ export default function TripDetailScreen() {
     setExpenseAmount(expense.amount);
     setExpenseDate(expense.expenseDate);
     setExpenseCategoryId(expense.budgetCategoryId ?? '');
+    setExpensePaidBy(expense.paidByUserId ?? currentUserId ?? '');
+    // Gasto viejo sin división cargada: se precargan todos los
+    // participantes en vez de dejarlo vacío, para invitar a dividirlo
+    // ahora en vez de tener que tildar a mano de cero.
+    setSplitParticipantIds(
+      expense.splits.length > 0 ? expense.splits.map((s) => s.userId) : participants.map((p) => p.userId)
+    );
     setExpenseFormError(null);
+  }
+
+  function toggleSplitParticipant(userId: string) {
+    setSplitParticipantIds((prev) => (prev.includes(userId) ? prev.filter((id) => id !== userId) : [...prev, userId]));
   }
 
   async function handleSubmitExpense() {
@@ -448,6 +555,8 @@ export default function TripDetailScreen() {
           amount: expenseAmount,
           expenseDate,
           budgetCategoryId: expenseCategoryId || null,
+          paidByUserId: expensePaidBy || undefined,
+          splitUserIds: splitParticipantIds,
         });
       } else {
         await createExpense(trip.id, {
@@ -456,6 +565,8 @@ export default function TripDetailScreen() {
           expenseDate,
           budgetCategoryId: expenseCategoryId || undefined,
           currency: trip.currency,
+          paidByUserId: expensePaidBy || undefined,
+          splitUserIds: splitParticipantIds,
         });
       }
       resetExpenseForm();
@@ -483,12 +594,111 @@ export default function TripDetailScreen() {
         budgetCategoryId: item.budgetCategoryId,
         sourceHotelId: item.type === 'hotel' ? item.id : undefined,
         sourceFlightId: item.type === 'flight' ? item.id : undefined,
+        // Default: lo pagó quien lo marca, dividido entre todos los
+        // participantes — editable después desde "Editar gasto" si no
+        // corresponde.
+        paidByUserId: currentUserId ?? undefined,
+        splitUserIds: participants.map((p) => p.userId),
       });
       await load();
     } catch {
       setPendingPaymentError('No se pudo registrar el pago.');
     } finally {
       setMarkingPaidId(null);
+    }
+  }
+
+  // Invitar colaborador por email (tab Colaboradores) — el backend exige
+  // que el usuario ya tenga cuenta creada (no hay invitación "pendiente"
+  // por ahora, ver decisión con Lautaro 2026-07-04: solo colaboradores con
+  // cuenta). Si el email no corresponde a ningún usuario, el backend
+  // devuelve 404 y se muestra tal cual.
+  async function handleAddCollaborator() {
+    if (!trip || !collabEmail.trim()) return;
+    setSavingCollab(true);
+    setCollabError(null);
+    try {
+      await addCollaborator(trip.id, { email: collabEmail.trim(), role: collabRole });
+      setCollabEmail('');
+      setCollabRole('editor');
+      await load();
+    } catch (err: any) {
+      const message = err?.response?.data?.error?.message ?? 'No se pudo agregar al colaborador.';
+      setCollabError(message);
+    } finally {
+      setSavingCollab(false);
+    }
+  }
+
+  // Reparto de un hotel/vuelo compartido entre viajeros (tabs Hoteles/
+  // Vuelos) — abre el editor precargado con el reparto existente, o con
+  // partes iguales del precio total si todavía no se armó ninguno.
+  function openShareEditor(type: 'hotel' | 'flight', item: SavedHotel | SavedFlight) {
+    setEditingSharesFor({ type, id: item.id });
+    setSharesError(null);
+    const draft: Record<string, string> = {};
+    if (item.shares.length > 0) {
+      for (const s of item.shares) draft[s.userId] = String(s.amount);
+    } else if (item.price != null && participants.length > 0) {
+      const each = Math.round((item.price / participants.length) * 100) / 100;
+      for (const p of participants) draft[p.userId] = String(each);
+    }
+    setShareDrafts(draft);
+  }
+
+  function cancelShareEditor() {
+    setEditingSharesFor(null);
+    setShareDrafts({});
+    setSharesError(null);
+  }
+
+  function setShareDraftAmount(userId: string, value: string) {
+    setShareDrafts((prev) => ({ ...prev, [userId]: value }));
+  }
+
+  // Guarda el reparto — solo entran los participantes con un monto > 0
+  // cargado (dejar un campo vacío o en 0 equivale a "no viaja en esta
+  // reserva"). El backend nunca toca una parte ya pagada, así que esto es
+  // seguro de reintentar aunque alguno ya haya pagado la suya.
+  async function handleSaveShares(type: 'hotel' | 'flight', itemId: string) {
+    setSavingShares(true);
+    setSharesError(null);
+    try {
+      const shares = participants
+        .map((p) => ({ userId: p.userId, amount: Number(shareDrafts[p.userId]) }))
+        .filter((s) => Number.isFinite(s.amount) && s.amount > 0);
+      if (type === 'hotel') await updateHotelShares(itemId, shares);
+      else await updateFlightShares(itemId, shares);
+      setEditingSharesFor(null);
+      setShareDrafts({});
+      await load();
+    } catch (err: any) {
+      const message = err?.response?.data?.error?.message ?? 'No se pudo guardar el reparto.';
+      setSharesError(message);
+    } finally {
+      setSavingShares(false);
+    }
+  }
+
+  // Marca la parte de un viajero puntual como pagada (fila individual en
+  // Gastos → Pendientes de pago, ver más abajo) — a diferencia de
+  // handleMarkAsPaid, esto no divide nada: crea un gasto a nombre de esa
+  // persona sola por su propio monto.
+  async function handlePayShare(share: BookingShare) {
+    setPayingShareId(share.id);
+    setSharePayError(null);
+    try {
+      // Siempre mandamos una fecha explícita (hoy si no se tocó el date
+      // picker) en vez de dejar que el backend la calcule solo — evita
+      // ambigüedad de timezone entre el server y quien está registrando el
+      // pago (mismo criterio que handleMarkAsPaid con todayISO()).
+      await payBookingShare(share.id, shareDates[share.id] || todayISO());
+      await load();
+    } catch (err: any) {
+      const message = err?.response?.data?.error?.message ?? 'No se pudo registrar el pago.';
+      setSharePayError(message);
+    } finally {
+      setPayingShareId(null);
     }
   }
 
@@ -541,9 +751,14 @@ export default function TripDetailScreen() {
   // no sumar un endpoint nuevo: ya tenemos hotels/flights/expenses cargados.
   const paidHotelIds = new Set(expenses.map((e) => e.sourceHotelId).filter((id): id is string => Boolean(id)));
   const paidFlightIds = new Set(expenses.map((e) => e.sourceFlightId).filter((id): id is string => Boolean(id)));
+  // Con reparto armado (shares.length > 0), "pendiente" se decide por
+  // persona (algún share sin pagar) en vez de por si YA existe algún gasto
+  // con ese source_hotel_id/source_flight_id — con varios viajeros pagando
+  // por separado, puede haber más de un gasto apuntando al mismo hotel/
+  // vuelo sin que eso signifique que ya está resuelto del todo.
   const pendingPayments: PendingPayment[] = [
     ...hotels
-      .filter((h) => h.price != null && !paidHotelIds.has(h.id))
+      .filter((h) => h.price != null && (h.shares.length > 0 ? h.shares.some((s) => !s.paid) : !paidHotelIds.has(h.id)))
       .map((h) => ({
         id: h.id,
         type: 'hotel' as const,
@@ -551,9 +766,10 @@ export default function TripDetailScreen() {
         price: h.price!,
         currency: h.currency ?? trip.currency,
         budgetCategoryId: h.budgetCategoryId,
+        shares: h.shares,
       })),
     ...flights
-      .filter((f) => f.price != null && !paidFlightIds.has(f.id))
+      .filter((f) => f.price != null && (f.shares.length > 0 ? f.shares.some((s) => !s.paid) : !paidFlightIds.has(f.id)))
       .map((f) => ({
         id: f.id,
         type: 'flight' as const,
@@ -563,6 +779,7 @@ export default function TripDetailScreen() {
         price: f.price!,
         currency: f.currency ?? trip.currency,
         budgetCategoryId: f.budgetCategoryId,
+        shares: f.shares,
       })),
   ];
 
@@ -593,6 +810,13 @@ export default function TripDetailScreen() {
   const preTripTotal = preTripExpenses.reduce((sum, e) => sum + num(e.amount), 0);
   const duringTripTotal = duringTripExpenses.reduce((sum, e) => sum + num(e.amount), 0);
 
+  // Tab Balances (2026-07 split-expenses): saldo neto por participante +
+  // simplificación de deudas, todo client-side a partir de expenses (con
+  // splits) y participants — ver src/utils/splitBalances.ts.
+  const balances = computeBalances(expenses, participants);
+  const settleUps = simplifyDebts(balances);
+  const isOwner = !!trip && currentUserId === trip.ownerId;
+
   function renderExpenseRow(exp: Expense) {
     const cat = budget?.categories.find((c) => c.category_id === exp.budgetCategoryId);
     return (
@@ -601,7 +825,13 @@ export default function TripDetailScreen() {
           <Text style={styles.expenseDescription}>{exp.description}</Text>
           <Text style={styles.expenseMeta}>
             {exp.expenseDate} · {cat ? `${categoryGlyph(cat.name)} ${cat.name}` : 'Sin categoría'}
+            {exp.paidByName ? ` · Pagó ${exp.paidByName}` : ''}
           </Text>
+          {exp.splits.length > 0 ? (
+            <Text style={styles.expenseSplitMeta}>
+              🔀 Dividido entre {exp.splits.length}: {exp.splits.map((s) => s.name).join(', ')}
+            </Text>
+          ) : null}
         </View>
         <Text style={styles.expenseAmount}>
           {money(exp.amount)} <Text style={styles.expenseCurrency}>{exp.currency}</Text>
@@ -615,6 +845,83 @@ export default function TripDetailScreen() {
           </Pressable>
         </View>
       </View>
+    );
+  }
+
+  // Sección "Reparto" de una tarjeta de hotel/vuelo (tabs Hoteles/Vuelos,
+  // 2026-07-06) — deja armar/editar cuánto le toca a cada viajero de este
+  // hotel/vuelo COMPARTIDO. Solo tiene sentido con precio cargado y más de
+  // un participante en el viaje; si no, no se muestra nada.
+  function renderShareSection(type: 'hotel' | 'flight', item: SavedHotel | SavedFlight) {
+    if (item.price == null || participants.length <= 1) return null;
+    const isEditing = editingSharesFor?.type === type && editingSharesFor.id === item.id;
+
+    if (isEditing) {
+      return (
+        <View style={styles.sharesEditor}>
+          <Text style={styles.sharesEditorTitle}>Reparto entre viajeros</Text>
+          {participants.map((p) => {
+            // Una parte ya pagada no se puede tocar desde acá (el backend
+            // la protege igual, pero mejor no dejar editar un campo que en
+            // los hechos no va a cambiar nada).
+            const existing = item.shares.find((s) => s.userId === p.userId);
+            if (existing?.paid) {
+              return (
+                <View key={p.userId} style={styles.shareEditorRow}>
+                  <Text style={styles.shareEditorName}>{p.name}</Text>
+                  <Text style={styles.shareEditorPaidNote}>{money(existing.amount)} · ya pagado</Text>
+                </View>
+              );
+            }
+            return (
+              <View key={p.userId} style={styles.shareEditorRow}>
+                <Text style={styles.shareEditorName}>{p.name}</Text>
+                <TextInput
+                  style={styles.shareEditorInput}
+                  keyboardType="numeric"
+                  placeholder="0"
+                  placeholderTextColor={colors.muted}
+                  value={shareDrafts[p.userId] ?? ''}
+                  onChangeText={(v) => setShareDraftAmount(p.userId, v)}
+                />
+              </View>
+            );
+          })}
+          <Text style={styles.shareEditorHint}>Dejar en 0 o vacío = esa persona no viaja en esta reserva.</Text>
+          {sharesError ? <Text style={styles.error}>{sharesError}</Text> : null}
+          <View style={styles.shareEditorActions}>
+            <Pressable onPress={cancelShareEditor}>
+              <Text style={styles.link}>Cancelar</Text>
+            </Pressable>
+            <Pressable
+              style={styles.smallButton}
+              onPress={() => handleSaveShares(type, item.id)}
+              disabled={savingShares}
+            >
+              <Text style={styles.smallButtonText}>{savingShares ? 'Guardando...' : 'Guardar reparto'}</Text>
+            </Pressable>
+          </View>
+        </View>
+      );
+    }
+
+    if (item.shares.length > 0) {
+      return (
+        <View style={styles.sharesSummary}>
+          <Text style={styles.sharesSummaryText}>
+            🔀 {item.shares.map((s) => `${s.name} ${money(s.amount)}${s.paid ? ' ✓' : ''}`).join(' · ')}
+          </Text>
+          <Pressable onPress={() => openShareEditor(type, item)}>
+            <Text style={styles.link}>Editar reparto</Text>
+          </Pressable>
+        </View>
+      );
+    }
+
+    return (
+      <Pressable onPress={() => openShareEditor(type, item)}>
+        <Text style={styles.link}>+ Repartir entre viajeros</Text>
+      </Pressable>
     );
   }
 
@@ -986,8 +1293,64 @@ export default function TripDetailScreen() {
                     Hoteles y vuelos guardados con precio que todavía no pasaste a gastos.
                   </Text>
                   {pendingPaymentError ? <Text style={styles.error}>{pendingPaymentError}</Text> : null}
+                  {sharePayError ? <Text style={styles.error}>{sharePayError}</Text> : null}
                   {pendingPayments.map((item) => {
                     const cat = budget?.categories.find((c) => c.category_id === item.budgetCategoryId);
+
+                    // Hotel/vuelo COMPARTIDO con reparto armado (tabs Hoteles/
+                    // Vuelos): cada persona marca su propia parte, con su propio
+                    // monto y fecha — en vez de un único botón para todo el ítem.
+                    if (item.shares.length > 0) {
+                      return (
+                        <View key={`${item.type}-${item.id}`} style={styles.pendingShareGroup}>
+                          <Text style={styles.expenseDescription}>
+                            {item.type === 'hotel' ? '🏨' : '✈️'} {item.title}
+                          </Text>
+                          <Text style={styles.expenseMeta}>
+                            {cat ? `${categoryGlyph(cat.name)} ${cat.name}` : 'Sin categoría'} · repartido entre{' '}
+                            {item.shares.length}
+                          </Text>
+                          {item.shares.map((share) => (
+                            <View key={share.id} style={styles.pendingShareRow}>
+                              <Text style={styles.pendingShareName}>{share.name}</Text>
+                              <Text style={styles.pendingShareAmount}>
+                                {money(share.amount)} <Text style={styles.expenseCurrency}>{item.currency}</Text>
+                              </Text>
+                              {share.paid ? (
+                                <Text style={styles.pendingSharePaid}>
+                                  ✓ {share.paidAt ? formatShort(share.paidAt) : 'Pagado'}
+                                </Text>
+                              ) : (
+                                <View style={styles.pendingSharePayControls}>
+                                  <View style={styles.pendingShareDateField}>
+                                    <DatePickerField
+                                      glyph="🗓️"
+                                      label="Fecha"
+                                      placeholder="Hoy"
+                                      value={shareDates[share.id] ?? ''}
+                                      onChange={(v) => setShareDates((prev) => ({ ...prev, [share.id]: v }))}
+                                    />
+                                  </View>
+                                  <Pressable
+                                    style={[
+                                      styles.markPaidButton,
+                                      payingShareId === share.id && styles.markPaidButtonDisabled,
+                                    ]}
+                                    onPress={() => handlePayShare(share)}
+                                    disabled={payingShareId === share.id}
+                                  >
+                                    <Text style={styles.markPaidButtonText}>
+                                      {payingShareId === share.id ? '...' : 'Marcar pagado'}
+                                    </Text>
+                                  </Pressable>
+                                </View>
+                              )}
+                            </View>
+                          ))}
+                        </View>
+                      );
+                    }
+
                     return (
                       <View key={`${item.type}-${item.id}`} style={styles.expenseRow}>
                         <View style={styles.expenseInfo}>
@@ -1041,6 +1404,34 @@ export default function TripDetailScreen() {
                     <DatePickerField glyph="🗓️" label="Fecha" placeholder="Elegí una fecha" value={expenseDate} onChange={setExpenseDate} />
                   </View>
                 </View>
+                {participants.length > 1 ? (
+                  <>
+                    <SelectField
+                      glyph="🙋"
+                      label="Pagado por"
+                      placeholder="Elegí quién pagó"
+                      value={expensePaidBy}
+                      onChange={setExpensePaidBy}
+                      options={participants.map((p) => ({ value: p.userId, label: p.name }))}
+                    />
+                    <Text style={styles.splitFieldLabel}>DIVIDIR ENTRE</Text>
+                    <View style={styles.formChipRow}>
+                      {participants.map((p) => (
+                        <Pressable
+                          key={p.userId}
+                          style={[styles.formChip, splitParticipantIds.includes(p.userId) && styles.formChipSelected]}
+                          onPress={() => toggleSplitParticipant(p.userId)}
+                        >
+                          <Text
+                            style={[styles.formChipLabel, splitParticipantIds.includes(p.userId) && styles.formChipLabelSelected]}
+                          >
+                            {p.name}
+                          </Text>
+                        </Pressable>
+                      ))}
+                    </View>
+                  </>
+                ) : null}
                 {expenseFormError ? <Text style={styles.error}>{expenseFormError}</Text> : null}
                 <Pressable style={styles.button} onPress={handleSubmitExpense} disabled={savingExpense}>
                   <Text style={styles.buttonText}>
@@ -1084,6 +1475,68 @@ export default function TripDetailScreen() {
             </View>
           ) : null}
 
+          {/* ---------- Panel: Balances ---------- */}
+          {activeTab === 'balances' ? (
+            <View style={styles.panel}>
+              <View style={styles.panelHead}>
+                <Text style={styles.panelTitle}>Balances entre participantes</Text>
+              </View>
+              {participants.length <= 1 ? (
+                <View style={styles.emptyState}>
+                  <Text style={styles.muted}>
+                    Este viaje todavía no tiene colaboradores — invitá a alguien desde la pestaña Colaboradores para
+                    empezar a dividir gastos.
+                  </Text>
+                </View>
+              ) : expenses.every((e) => e.splits.length === 0) ? (
+                <View style={styles.emptyState}>
+                  <Text style={styles.muted}>
+                    Todavía no hay gastos divididos. Al registrar un gasto en la tab Gastos, elegí quién pagó y entre
+                    quiénes se divide.
+                  </Text>
+                </View>
+              ) : (
+                <>
+                  <View style={styles.expenseSection}>
+                    <Text style={styles.expenseSectionTitle}>Saldo neto</Text>
+                    {balances.map((b) => (
+                      <View key={b.userId} style={styles.balanceRow}>
+                        <Text style={styles.balanceName}>{b.name}</Text>
+                        <Text
+                          style={[
+                            styles.balanceAmount,
+                            b.net > 0.01 ? styles.balancePositive : b.net < -0.01 ? styles.balanceNegative : styles.balanceNeutral,
+                          ]}
+                        >
+                          {b.net > 0.01 ? `+${money(b.net)}` : b.net < -0.01 ? `−${money(Math.abs(b.net))}` : '0'}{' '}
+                          {trip.currency}
+                        </Text>
+                      </View>
+                    ))}
+                  </View>
+
+                  <View style={styles.expenseSection}>
+                    <Text style={styles.expenseSectionTitle}>Para saldar cuentas</Text>
+                    {settleUps.length === 0 ? (
+                      <Text style={styles.muted}>Ya está todo saldado — nadie le debe a nadie.</Text>
+                    ) : (
+                      settleUps.map((s, i) => (
+                        <View key={i} style={styles.settleRow}>
+                          <Text style={styles.settleText}>
+                            {s.fromName} → {s.toName}
+                          </Text>
+                          <Text style={styles.settleAmount}>
+                            {money(s.amount)} {trip.currency}
+                          </Text>
+                        </View>
+                      ))
+                    )}
+                  </View>
+                </>
+              )}
+            </View>
+          ) : null}
+
           {/* ---------- Panel: Hoteles ---------- */}
           {activeTab === 'hotels' ? (
             <View style={styles.panel}>
@@ -1103,6 +1556,9 @@ export default function TripDetailScreen() {
                     <View style={styles.savedCardHeader}>
                       <Text style={styles.savedCardTitle}>🏨 {hotel.name}</Text>
                       <View style={styles.savedCardHeaderRight}>
+                        <Pressable hitSlop={8} onPress={() => handleEditHotel(hotel)}>
+                          <Text style={styles.itemEditGlyph}>✎</Text>
+                        </Pressable>
                         <Pressable
                           hitSlop={8}
                           onPress={() => setDeleteTarget({ type: 'hotel', id: hotel.id, name: hotel.name })}
@@ -1121,6 +1577,7 @@ export default function TripDetailScreen() {
                         {hotel.price} <Text style={styles.savedPriceUnit}>{hotel.currency} / noche</Text>
                       </Text>
                     ) : null}
+                    {renderShareSection('hotel', hotel)}
                   </View>
                 ))
               )}
@@ -1188,6 +1645,7 @@ export default function TripDetailScreen() {
                             {flight.price} <Text style={styles.savedPriceUnit}>{flight.currency}</Text>
                           </Text>
                         ) : null}
+                        {renderShareSection('flight', flight)}
                       </View>
                       <View style={styles.flightStub}>
                         {/* stubK es blanco 50% para el fondo OSCURO de
@@ -1241,6 +1699,73 @@ export default function TripDetailScreen() {
                 <LegendItem color={colors.stamp} label="Hoteles" count={pins.filter((p) => p.type === 'hotel').length} />
                 <LegendItem color={colors.teal} label="Actividades" count={pins.filter((p) => p.type === 'activity').length} />
                 <LegendItem color={colors.gold} label="Lugares guardados" count={pins.filter((p) => p.type === 'place').length} />
+              </View>
+            </View>
+          ) : null}
+
+          {/* ---------- Panel: Colaboradores ---------- */}
+          {activeTab === 'collab' ? (
+            <View style={styles.panel}>
+              <View style={styles.panelHead}>
+                <Text style={styles.panelTitle}>Colaboradores</Text>
+              </View>
+
+              {isOwner ? (
+                <View style={styles.form}>
+                  <Text style={styles.formTitle}>+ Invitar colaborador</Text>
+                  <Text style={styles.muted}>Tiene que ser el email de alguien que ya tenga cuenta en la app.</Text>
+                  <TextInput
+                    style={styles.input}
+                    placeholder="Email"
+                    placeholderTextColor={colors.muted}
+                    autoCapitalize="none"
+                    keyboardType="email-address"
+                    value={collabEmail}
+                    onChangeText={setCollabEmail}
+                  />
+                  <View style={styles.formChipRow}>
+                    {(['editor', 'viewer'] as const).map((r) => (
+                      <Pressable
+                        key={r}
+                        style={[styles.formChip, collabRole === r && styles.formChipSelected]}
+                        onPress={() => setCollabRole(r)}
+                      >
+                        <Text style={[styles.formChipLabel, collabRole === r && styles.formChipLabelSelected]}>
+                          {r === 'editor' ? 'Editor' : 'Solo lectura'}
+                        </Text>
+                      </Pressable>
+                    ))}
+                  </View>
+                  {collabError ? <Text style={styles.error}>{collabError}</Text> : null}
+                  <Pressable style={styles.button} onPress={handleAddCollaborator} disabled={savingCollab}>
+                    <Text style={styles.buttonText}>{savingCollab ? 'Agregando...' : 'Invitar'}</Text>
+                  </Pressable>
+                </View>
+              ) : null}
+
+              <View style={styles.expenseSection}>
+                <Text style={styles.expenseSectionTitle}>Participantes del viaje</Text>
+                {participants.map((p) => (
+                  <View key={p.userId} style={styles.collabRow}>
+                    <View style={styles.collabInfo}>
+                      <Text style={styles.collabName}>{p.name}</Text>
+                      <Text style={styles.collabMeta}>{p.email}</Text>
+                    </View>
+                    <View style={styles.collabRoleBadge}>
+                      <Text style={styles.collabRoleBadgeText}>
+                        {p.role === 'owner' ? 'Dueño' : p.role === 'editor' ? 'Editor' : 'Lectura'}
+                      </Text>
+                    </View>
+                    {isOwner && p.role !== 'owner' ? (
+                      <Pressable
+                        hitSlop={8}
+                        onPress={() => setDeleteTarget({ type: 'collaborator', id: p.userId, name: p.name })}
+                      >
+                        <Text style={styles.itemDeleteGlyph}>✕</Text>
+                      </Pressable>
+                    ) : null}
+                  </View>
+                ))}
               </View>
             </View>
           ) : null}
@@ -1778,4 +2303,112 @@ const styles = StyleSheet.create({
   },
   markPaidButtonDisabled: { opacity: 0.5 },
   markPaidButtonText: { fontFamily: fonts.mono, fontSize: 10.5, fontWeight: '700', color: colors.white },
+
+  // "Dividido entre..." debajo de la fila de gasto (tab Gastos) — solo se
+  // muestra si el gasto tiene división cargada, ver Expense.splits.
+  expenseSplitMeta: { fontFamily: fonts.mono, fontSize: 11, color: colors.teal, marginTop: 2 },
+
+  // "Dividir entre" en el form de gasto: reusa el patrón formChip/formChipSelected
+  // (mismo look que categorías de actividad) — uno por participante del viaje.
+  splitFieldLabel: { fontFamily: fonts.mono, fontSize: 11, fontWeight: '700', color: colors.muted, marginTop: spacing.stackSm, marginBottom: 6 },
+
+  // Tab Colaboradores: form de invitar + lista de participantes.
+  collabRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    paddingVertical: 10,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.line,
+    borderStyle: 'dashed',
+  },
+  collabInfo: { flex: 1 },
+  collabName: { fontSize: 14, fontWeight: '600', color: colors.ink },
+  collabMeta: { fontFamily: fonts.mono, fontSize: 11, color: colors.muted, marginTop: 2 },
+  collabRoleBadge: {
+    borderRadius: radius.full,
+    paddingVertical: 3,
+    paddingHorizontal: 9,
+    backgroundColor: colors.line,
+  },
+  collabRoleBadgeText: { fontFamily: fonts.mono, fontSize: 10, fontWeight: '700', color: colors.muted },
+
+  // Tab Balances: saldo neto por persona + lista de "quién le paga a quién".
+  // Positivo (le deben) en teal, negativo (debe) en el naranja "sello" que
+  // ya se usa para errores/alertas en el resto del dossier.
+  balanceRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    paddingVertical: 10,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.line,
+    borderStyle: 'dashed',
+  },
+  balanceName: { fontSize: 14, fontWeight: '600', color: colors.ink, flex: 1 },
+  balanceAmount: { fontFamily: fonts.displaySemibold, fontSize: 14, fontWeight: '700' },
+  balancePositive: { color: colors.teal },
+  balanceNegative: { color: colors.stamp },
+  balanceNeutral: { color: colors.muted },
+  settleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingVertical: 10,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.line,
+    borderStyle: 'dashed',
+  },
+  settleText: { fontSize: 13, color: colors.ink, flex: 1 },
+  settleAmount: { fontFamily: fonts.mono, fontSize: 12.5, fontWeight: '700', color: colors.ink },
+
+  // Sección "Reparto" en la tarjeta de hotel/vuelo (2026-07-06).
+  sharesSummary: { marginTop: 8, gap: 2 },
+  sharesSummaryText: { fontFamily: fonts.mono, fontSize: 11, color: colors.teal },
+  sharesEditor: {
+    marginTop: 10,
+    backgroundColor: colors.paper2,
+    borderRadius: radius.lg,
+    padding: spacing.stackMd,
+    gap: 8,
+  },
+  sharesEditorTitle: { fontFamily: fonts.displaySemibold, fontWeight: '700', fontSize: 13, color: colors.ink },
+  shareEditorRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 10 },
+  shareEditorName: { fontSize: 13.5, color: colors.ink, flex: 1 },
+  shareEditorInput: {
+    width: 90,
+    borderWidth: 1,
+    borderColor: colors.line,
+    borderRadius: radius.sm,
+    paddingVertical: 6,
+    paddingHorizontal: 8,
+    backgroundColor: colors.surface,
+    fontSize: 13.5,
+    color: colors.ink,
+    textAlign: 'right',
+  },
+  shareEditorHint: { fontFamily: fonts.mono, fontSize: 10.5, color: colors.muted },
+  shareEditorPaidNote: { fontFamily: fonts.mono, fontSize: 11.5, color: colors.teal },
+  shareEditorActions: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: 4 },
+
+  // Desglose por persona en "Pendientes de pago" (Gastos) cuando el hotel/
+  // vuelo tiene un reparto armado — reemplaza la fila con un solo botón.
+  pendingShareGroup: {
+    paddingVertical: 10,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.line,
+    borderStyle: 'dashed',
+    gap: 4,
+  },
+  pendingShareRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    paddingTop: 8,
+  },
+  pendingShareName: { fontSize: 13.5, fontWeight: '600', color: colors.ink, flex: 1 },
+  pendingShareAmount: { fontFamily: fonts.mono, fontSize: 13, color: colors.ink },
+  pendingSharePaid: { fontFamily: fonts.mono, fontSize: 11.5, fontWeight: '700', color: colors.teal },
+  pendingSharePayControls: { flexDirection: 'row', alignItems: 'flex-end', gap: 8 },
+  pendingShareDateField: { width: 130 },
 });

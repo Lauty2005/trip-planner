@@ -66,7 +66,8 @@ Regla de autorización transversal: toda ruta bajo `/trips/:tripId/*` valida que
 | GET | `/hotels/search` | Proxy server-side a Amadeus Hotel Search (oculta la API key) |
 | GET | `/trips/:tripId/hotels` | Lista hoteles guardados/reservados del trip |
 | POST | `/trips/:tripId/hotels` | Guarda hotel (manual o desde resultado de búsqueda) |
-| PATCH | `/hotels/:id` | Edita (ej: cambiar status a 'booked') |
+| PATCH | `/hotels/:id` | Edita |
+| PUT | `/hotels/:id/shares` | Arma/reemplaza el reparto del hotel entre viajeros (`{ shares: [{userId, amount}] }`) — nunca toca una parte ya pagada |
 | DELETE | `/hotels/:id` | Elimina |
 
 ## Vuelos
@@ -75,10 +76,18 @@ Regla de autorización transversal: toda ruta bajo `/trips/:tripId/*` valida que
 |---|---|---|
 | GET | `/flights/search` | Proxy server-side a Amadeus Flight Offers Search |
 | GET | `/flights/estimate-arrival` | Estima `arrivalDatetime` a partir de `origin`/`destination`/`departureDatetime` (geocoding + distancia, aproximado — no es el horario real del vuelo) |
+| GET | `/flights/lookup?flightNumber=&date=` | Busca un vuelo puntual (ej. `flightNumber=AR1234`) vía AeroDataBox y devuelve aeropuertos/horarios reales para autocompletar el form — requiere `AERODATABOX_RAPIDAPI_KEY` en `.env`, si no responde 503 `not_configured` |
 | GET | `/trips/:tripId/flights` | Lista vuelos guardados/reservados del trip |
 | POST | `/trips/:tripId/flights` | Guarda vuelo (incluye `legType`: `departure`\|`return`\|`one_way`, y datos de escala opcionales) |
 | PATCH | `/flights/:id` | Edita |
+| PUT | `/flights/:id/shares` | Arma/reemplaza el reparto del vuelo entre viajeros (`{ shares: [{userId, amount}] }`) — nunca toca una parte ya pagada |
 | DELETE | `/flights/:id` | Elimina |
+
+## Reparto de hoteles/vuelos compartidos
+
+| Método | Ruta | Descripción |
+|---|---|---|
+| POST | `/booking-shares/:id/pay` | Marca la parte de UN viajero como pagada (`{ paidDate? }`, default hoy) — crea el gasto real a su nombre y lo vincula de vuelta al reparto |
 
 ## Ubicaciones (autocompletado)
 

@@ -126,6 +126,14 @@ export const expenseCreateSchema = z.object({
   // schema.sql, a lo sumo uno de los dos.
   sourceHotelId: uuid.nullish(),
   sourceFlightId: uuid.nullish(),
+  // Quién puso la plata — por default el usuario autenticado (ver
+  // expenses.routes.ts), pero editable por si quien carga el gasto no fue
+  // quien pagó.
+  paidByUserId: uuid.nullish(),
+  // Entre quiénes se divide en partes iguales (participantes del viaje,
+  // ver GET /trips/:tripId/participants) — omitido o vacío = gasto no
+  // dividido, no entra en el cálculo de balances.
+  splitUserIds: z.array(uuid).optional(),
 });
 
 export const expenseUpdateSchema = z.object({
@@ -133,6 +141,8 @@ export const expenseUpdateSchema = z.object({
   amount: z.number().min(0).optional(),
   expenseDate: dateLike.optional(),
   budgetCategoryId: uuid.nullish(),
+  paidByUserId: uuid.nullish(),
+  splitUserIds: z.array(uuid).optional(),
 });
 
 // ---- Hotels -------------------------------------------------------------
@@ -152,7 +162,19 @@ export const hotelCreateSchema = z.object({
   budgetCategoryId: uuid.nullish(),
 });
 
+// Antes solo permitía tocar status/price/notes/budgetCategoryId (todo el
+// resto de un hotel cargado quedaba fijo). Se amplía para soportar "Editar
+// hotel" desde el dossier (2026-07-06, a pedido de Lautaro) — mismos campos
+// que hotelCreateSchema, todos opcionales acá porque un PATCH puede tocar
+// solo alguno.
 export const hotelUpdateSchema = z.object({
+  name: z.string().min(1).max(200).optional(),
+  address: z.string().nullish(),
+  lat: lat.nullish(),
+  lng: lng.nullish(),
+  checkInDate: dateLike.optional(),
+  checkOutDate: dateLike.optional(),
+  currency: currency.optional(),
   status: z.enum(['candidate', 'booked', 'cancelled']).optional(),
   price: z.number().min(0).nullish(),
   notes: z.string().nullish(),
@@ -203,6 +225,25 @@ export const flightUpdateSchema = z.object({
   layoverDurationMinutes: z.number().int().nullish(),
   layoverFlightNumber: z.string().max(20).nullish(),
   budgetCategoryId: uuid.nullish(),
+});
+
+// ---- Booking shares -------------------------------------------------------
+// Reparto de un hotel/vuelo compartido entre viajeros, cada uno con su
+// propio monto (2026-07-06). Ver comentario largo en schema.sql.
+
+export const bookingSharesReplaceSchema = z.object({
+  shares: z
+    .array(
+      z.object({
+        userId: uuid,
+        amount: z.number().min(0),
+      })
+    )
+    .max(50),
+});
+
+export const bookingSharePaySchema = z.object({
+  paidDate: dateLike.optional(),
 });
 
 // ---- Saved places -------------------------------------------------------

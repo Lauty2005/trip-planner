@@ -15,6 +15,12 @@ erDiagram
     BUDGET_CATEGORIES ||--o{ FLIGHTS : "planned under"
     HOTELS ||--o| EXPENSES : "paid as"
     FLIGHTS ||--o| EXPENSES : "paid as"
+    EXPENSES ||--o{ EXPENSE_SPLITS : "split among"
+    USERS ||--o{ EXPENSE_SPLITS : "owes a share of"
+    HOTELS ||--o{ BOOKING_SHARES : "shared by"
+    FLIGHTS ||--o{ BOOKING_SHARES : "shared by"
+    USERS ||--o{ BOOKING_SHARES : "owes their part of"
+    BOOKING_SHARES ||--o| EXPENSES : "settled as"
 
     USERS {
         uuid id PK
@@ -96,4 +102,17 @@ erDiagram
         varchar name
         double lat
         double lng
+    }
+    EXPENSE_SPLITS {
+        uuid id PK
+        uuid expense_id FK
+        uuid user_id FK
+    }
+    BOOKING_SHARES {
+        uuid id PK
+        uuid hotel_id FK
+        uuid flight_id FK
+        uuid user_id FK
+        numeric amount
+        uuid expense_id FK
     }

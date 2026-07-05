@@ -21,12 +21,17 @@ function mapExpense(r: any): Expense {
     tripId: r.trip_id,
     budgetCategoryId: r.budget_category_id ?? undefined,
     paidByUserId: r.paid_by_user_id ?? undefined,
+    paidByName: r.paid_by_name ?? undefined,
     sourceHotelId: r.source_hotel_id ?? undefined,
     sourceFlightId: r.source_flight_id ?? undefined,
     description: r.description,
     amount: Number(r.amount),
     currency: r.currency,
     expenseDate: typeof r.expense_date === 'string' ? r.expense_date.slice(0, 10) : r.expense_date,
+    // El POST/PATCH del backend devuelve la fila cruda de expenses (sin el
+    // JOIN de splits que sí trae el GET) — en esos casos `r.splits` no
+    // viene, así que queda vacío hasta el próximo `load()`.
+    splits: Array.isArray(r.splits) ? r.splits.map((s: any) => ({ userId: s.userId, name: s.name })) : [],
   };
 }
 
@@ -56,6 +61,11 @@ export async function createExpense(
     // dossier. En un registro manual de gasto ninguno de los dos va.
     sourceHotelId?: string;
     sourceFlightId?: string;
+    // Quién pagó (default: usuario logueado, ver expenses.routes.ts) y
+    // entre quiénes se divide en partes iguales (participantes del viaje,
+    // ver getTripParticipants) — omitir splitUserIds = gasto no dividido.
+    paidByUserId?: string;
+    splitUserIds?: string[];
   }
 ): Promise<Expense> {
   // `currency` es opcional acá pero SIEMPRE se manda desde las pantallas
@@ -93,7 +103,16 @@ export async function updateExpense(
   // budgetCategoryId acepta `null` explícito para "sacar" la categoría del
   // gasto (a diferencia de `undefined`, que significa "no tocar este
   // campo") — ver el fix en expenses.routes.ts (PATCH /expenses/:id).
-  payload: { description?: string; amount?: number; expenseDate?: string; budgetCategoryId?: string | null }
+  // splitUserIds: mandarlo (aunque sea []) reemplaza toda la división;
+  // omitirlo la deja como está.
+  payload: {
+    description?: string;
+    amount?: number;
+    expenseDate?: string;
+    budgetCategoryId?: string | null;
+    paidByUserId?: string;
+    splitUserIds?: string[];
+  }
 ): Promise<Expense> {
   const { data } = await apiClient.patch(`/expenses/${expenseId}`, payload);
   return mapExpense(data);

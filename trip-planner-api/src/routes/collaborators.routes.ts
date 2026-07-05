@@ -22,6 +22,33 @@ router.get('/trips/:tripId/collaborators', requireTripAccess('viewer'), async (r
   }
 });
 
+// Participantes del viaje para dividir gastos (form de Gastos, tab
+// Balances) — a diferencia de /collaborators, incluye también al dueño
+// del viaje (trips.owner_id nunca tiene fila en trip_collaborators desde
+// la migración 20260703150000). Sin esto, un viaje recién creado (solo
+// dueño, sin colaboradores invitados todavía) no tendría a quién dividirle
+// nada.
+router.get('/trips/:tripId/participants', requireTripAccess('viewer'), async (req, res, next) => {
+  try {
+    const result = await pool.query(
+      `SELECT user_id, name, email, role FROM (
+         SELECT t.owner_id AS user_id, u.name, u.email, 'owner' AS role
+         FROM trips t JOIN users u ON u.id = t.owner_id
+         WHERE t.id = $1
+         UNION ALL
+         SELECT tc.user_id, u.name, u.email, tc.role
+         FROM trip_collaborators tc JOIN users u ON u.id = tc.user_id
+         WHERE tc.trip_id = $1
+       ) participants
+       ORDER BY (role = 'owner') DESC, name`,
+      [req.params.tripId]
+    );
+    res.json(result.rows);
+  } catch (err) {
+    next(err);
+  }
+});
+
 router.post('/trips/:tripId/collaborators', requireTripAccess('owner'), validateBody(collaboratorCreateSchema), async (req, res, next) => {
   try {
     const { email, role = 'editor' } = req.body;

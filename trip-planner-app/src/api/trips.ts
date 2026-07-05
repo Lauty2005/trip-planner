@@ -62,20 +62,44 @@ function mapTrip(r: any): Trip {
   };
 }
 
+// Reparto de un hotel/vuelo COMPARTIDO entre viajeros (2026-07-06) — a
+// diferencia de expense_splits (partes iguales de un gasto ya pagado),
+// acá el monto por persona puede ser distinto y todavía no hay gasto:
+// `paid`/`paidAt` se completan recién cuando ESA persona marca su parte
+// como pagada (POST /booking-shares/:id/pay). Ver src/utils/splitBalances.ts
+// — estos pagos individuales no generan deuda cruzada (cada quien paga lo
+// suyo), así que no entran al cálculo de balances.
+export interface BookingShare {
+  id: string;
+  userId: string;
+  name: string;
+  amount: number;
+  paid: boolean;
+  paidAt?: string;
+}
+
 // Hoteles/vuelos guardados de un viaje. El backend devuelve las filas crudas
 // de la base (snake_case, vía SELECT *), así que las mapeamos acá a camelCase
 // para el resto de la app.
 export interface SavedHotel {
   id: string;
   name: string;
+  address?: string;
   checkInDate?: string;
   checkOutDate?: string;
   price?: number;
   currency?: string;
   status: BookingStatus;
+  // No se mapeaba antes (nadie la leía) — hace falta para precargar el
+  // form de "Editar hotel" sin pisar notas ya guardadas con un blank.
+  notes?: string;
   // Categoría de presupuesto a la que cae el gasto cuando se marca este
   // hotel como pagado (tab Gastos) — ver pendingPayments en el dossier.
   budgetCategoryId?: string;
+  // Reparto entre viajeros, si se armó uno (sección "Reparto" de la
+  // tarjeta) — vacío = no compartido, sigue el flujo viejo de "Marcar
+  // pagado" único para todo el hotel.
+  shares: BookingShare[];
 }
 
 // Tramo del vuelo dentro del viaje — puramente informativo (agrupar/
@@ -104,12 +128,28 @@ export interface SavedFlight {
   // Categoría de presupuesto a la que cae el gasto cuando se marca este
   // vuelo como pagado (tab Gastos) — ver pendingPayments en el dossier.
   budgetCategoryId?: string;
+  // Ver SavedHotel.shares.
+  shares: BookingShare[];
+}
+
+function mapBookingShares(raw: any): BookingShare[] {
+  return Array.isArray(raw)
+    ? raw.map((s: any) => ({
+        id: s.id,
+        userId: s.userId,
+        name: s.name,
+        amount: Number(s.amount),
+        paid: Boolean(s.paid),
+        paidAt: s.paidAt ? toDateOnly(s.paidAt) : undefined,
+      }))
+    : [];
 }
 
 function mapSavedHotel(r: any): SavedHotel {
   return {
     id: r.id,
     name: r.name,
+    address: r.address ?? undefined,
     // check_in_date/check_out_date son columnas DATE — sin este slice
     // llegaban como el ISO completo que arma pg al parsearlas ('2026-12-
     // 24T03:00:00.000Z', con la hora que le puso el driver, no la fecha
@@ -120,7 +160,9 @@ function mapSavedHotel(r: any): SavedHotel {
     price: r.price != null ? Number(r.price) : undefined,
     currency: r.currency,
     status: r.status,
+    notes: r.notes ?? undefined,
     budgetCategoryId: r.budget_category_id ?? undefined,
+    shares: mapBookingShares(r.shares),
   };
 }
 
@@ -143,6 +185,7 @@ function mapSavedFlight(r: any): SavedFlight {
     layoverFlightNumber: r.layover_flight_number ?? undefined,
     notes: r.notes ?? undefined,
     budgetCategoryId: r.budget_category_id ?? undefined,
+    shares: mapBookingShares(r.shares),
   };
 }
 
@@ -238,20 +281,28 @@ export async function getTripFlights(tripId: string): Promise<SavedFlight[]> {
 // (POST /trips/:tripId/hotels y /flights) — esos endpoints nunca dependieron
 // de Amadeus, solo insertan filas; `bookingSource: 'manual'` en vez de
 // `'amadeus'` es la única diferencia real.
-export async function createHotel(
-  tripId: string,
-  payload: {
-    name: string;
-    address?: string;
-    checkInDate: string;
-    checkOutDate: string;
-    price?: number;
-    currency?: string;
-    notes?: string;
-    budgetCategoryId?: string;
-  }
-): Promise<SavedHotel> {
+export interface HotelFormPayload {
+  name: string;
+  address?: string;
+  checkInDate: string;
+  checkOutDate: string;
+  price?: number;
+  currency?: string;
+  notes?: string;
+  budgetCategoryId?: string;
+}
+
+export async function createHotel(tripId: string, payload: HotelFormPayload): Promise<SavedHotel> {
   const { data } = await apiClient.post(`/trips/${tripId}/hotels`, { ...payload, bookingSource: 'manual' });
+  return mapSavedHotel(data);
+}
+
+// Edición de hotel (botón "Editar" en la tab Hoteles del dossier, 2026-07-06)
+// — mismo patrón que updateFlight: el backend ya soporta PATCH /hotels/:id
+// con todos los campos editables (antes solo status/price/notes/budgetCategoryId).
+// Si se cambia address/name sin mandar lat/lng, el backend re-geocodifica solo.
+export async function updateHotel(hotelId: string, payload: Partial<HotelFormPayload>): Promise<SavedHotel> {
+  const { data } = await apiClient.patch(`/hotels/${hotelId}`, payload);
   return mapSavedHotel(data);
 }
 
@@ -318,6 +369,27 @@ export async function estimateFlightArrival(
   }
 }
 
+// Autocompletar el form de Reservas a partir de aerolínea + número de
+// vuelo + fecha de salida — botón "Buscar vuelo" (2026-07-07, a pedido de
+// Lautaro). Proxy server-side a AeroDataBox (services/aerodatabox.ts en el
+// backend); si no hay AERODATABOX_RAPIDAPI_KEY configurada, el backend
+// devuelve 503 `not_configured` — a diferencia de estimateFlightArrival,
+// acá NO se traga el error: el form necesita distinguir "no configurado"
+// de "no se encontró ese vuelo" (array vacío) de un error de red genérico.
+export interface FlightLookupResult {
+  airline?: string;
+  flightNumber: string;
+  departureAirport?: string;
+  arrivalAirport?: string;
+  departureDatetime?: string;
+  arrivalDatetime?: string;
+}
+
+export async function lookupFlight(flightNumber: string, date: string): Promise<FlightLookupResult[]> {
+  const { data } = await apiClient.get('/flights/lookup', { params: { flightNumber, date } });
+  return data ?? [];
+}
+
 // Borrado de hotel/vuelo guardado — botón "Eliminar" en las tabs
 // Hoteles/Vuelos del dossier. Mismos endpoints DELETE /hotels/:id y
 // /flights/:id que ya existían en el backend sin usar desde el cliente.
@@ -327,4 +399,32 @@ export async function deleteHotel(hotelId: string): Promise<void> {
 
 export async function deleteFlight(flightId: string): Promise<void> {
   await apiClient.delete(`/flights/${flightId}`);
+}
+
+// Reparto de un hotel/vuelo compartido entre viajeros (2026-07-06, a pedido
+// de Lautaro) — sección "Reparto" en la tarjeta del hotel/vuelo. Reemplaza
+// la lista entera cada vez (igual que updateExpense con splitUserIds); el
+// backend nunca borra ni pisa el monto de una parte ya pagada aunque se la
+// mande con otro valor o se la saque de la lista.
+export async function updateHotelShares(
+  hotelId: string,
+  shares: { userId: string; amount: number }[]
+): Promise<BookingShare[]> {
+  const { data } = await apiClient.put(`/hotels/${hotelId}/shares`, { shares });
+  return mapBookingShares(data);
+}
+
+export async function updateFlightShares(
+  flightId: string,
+  shares: { userId: string; amount: number }[]
+): Promise<BookingShare[]> {
+  const { data } = await apiClient.put(`/flights/${flightId}/shares`, { shares });
+  return mapBookingShares(data);
+}
+
+// Marca la parte de UN viajero como pagada (fila individual en Gastos →
+// Pendientes de pago) — crea el gasto real a su nombre. paidDate opcional
+// (default: hoy en el backend).
+export async function payBookingShare(shareId: string, paidDate?: string): Promise<void> {
+  await apiClient.post(`/booking-shares/${shareId}/pay`, paidDate ? { paidDate } : {});
 }
