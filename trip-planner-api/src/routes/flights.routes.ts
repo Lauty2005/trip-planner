@@ -6,7 +6,6 @@ import { validateBody } from '../middleware/validate.js';
 import { flightCreateSchema, flightUpdateSchema, bookingSharesReplaceSchema } from '../schemas.js';
 import { searchFlightOffers } from '../services/amadeus.js';
 import { estimateArrival } from '../services/flightEstimate.js';
-import { lookupFlightByNumber } from '../services/aerodatabox.js';
 import { replaceBookingShares } from '../services/bookingShares.js';
 
 const router = Router();
@@ -43,31 +42,6 @@ router.get('/flights/estimate-arrival', async (req, res, next) => {
     }
     res.json(estimate);
   } catch (err) {
-    next(err);
-  }
-});
-
-// Autocompletar el form de Reservas a partir de aerolínea + número de
-// vuelo (ej. 'AR1234') + fecha de salida — botón "Buscar vuelo" (2026-07-07,
-// a pedido de Lautaro). Distinto de /flights/search (Amadeus, por origen/
-// destino): esto busca UN vuelo puntual vía AeroDataBox. Puede devolver
-// más de un resultado (codeshares del mismo vuelo físico); el form decide
-// qué hacer con eso.
-router.get('/flights/lookup', async (req, res, next) => {
-  try {
-    const { flightNumber, date } = req.query as Record<string, string>;
-    if (!flightNumber || !date) {
-      return res.status(400).json({ error: { code: 'bad_request', message: 'Faltan flightNumber o date' } });
-    }
-    const results = await lookupFlightByNumber({
-      flightNumber: flightNumber.toUpperCase().replace(/\s+/g, ''),
-      date,
-    });
-    res.json(results);
-  } catch (err: any) {
-    if (err?.message?.includes('AERODATABOX_RAPIDAPI_KEY')) {
-      return res.status(503).json({ error: { code: 'not_configured', message: err.message } });
-    }
     next(err);
   }
 });

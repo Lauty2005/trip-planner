@@ -369,27 +369,6 @@ export async function estimateFlightArrival(
   }
 }
 
-// Autocompletar el form de Reservas a partir de aerolínea + número de
-// vuelo + fecha de salida — botón "Buscar vuelo" (2026-07-07, a pedido de
-// Lautaro). Proxy server-side a AeroDataBox (services/aerodatabox.ts en el
-// backend); si no hay AERODATABOX_RAPIDAPI_KEY configurada, el backend
-// devuelve 503 `not_configured` — a diferencia de estimateFlightArrival,
-// acá NO se traga el error: el form necesita distinguir "no configurado"
-// de "no se encontró ese vuelo" (array vacío) de un error de red genérico.
-export interface FlightLookupResult {
-  airline?: string;
-  flightNumber: string;
-  departureAirport?: string;
-  arrivalAirport?: string;
-  departureDatetime?: string;
-  arrivalDatetime?: string;
-}
-
-export async function lookupFlight(flightNumber: string, date: string): Promise<FlightLookupResult[]> {
-  const { data } = await apiClient.get('/flights/lookup', { params: { flightNumber, date } });
-  return data ?? [];
-}
-
 // Borrado de hotel/vuelo guardado — botón "Eliminar" en las tabs
 // Hoteles/Vuelos del dossier. Mismos endpoints DELETE /hotels/:id y
 // /flights/:id que ya existían en el backend sin usar desde el cliente.
