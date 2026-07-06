@@ -66,15 +66,64 @@ router.post('/trips/:tripId/collaborators', requireTripAccess('owner'), validate
   }
 });
 
+// Al sacar un colaborador, limpiamos su reparto (booking_shares) en los
+// hoteles/vuelos de ESTE viaje (2026-07-06, a pedido de Lautaro — reportó
+// que después de eliminar a un colaborador seguía apareciendo repartido en
+// "Pendientes de pago"). Reglas:
+//   1. Se borran las partes SIN pagar de esa persona (expense_id IS NULL —
+//      una parte ya pagada es un gasto real ya registrado, no se toca).
+//   2. Si el reparto de un hotel/vuelo queda en 0 o 1 persona después de
+//      eso, se borra entero — un "reparto" de una sola persona no tiene
+//      sentido, vuelve al flujo normal de "un solo pagador" por el precio
+//      completo (ver pendingPayments en el dossier: shares.length === 0
+//      cae en ese camino).
+// No tocamos expense_splits (la división de gastos YA cargados en la tab
+// Gastos) — eso es historial de gastos reales, no un reparto en curso.
 router.delete('/trips/:tripId/collaborators/:userId', requireTripAccess('owner'), async (req, res, next) => {
+  const client = await pool.connect();
   try {
-    await pool.query('DELETE FROM trip_collaborators WHERE trip_id = $1 AND user_id = $2', [
+    await client.query('BEGIN');
+
+    await client.query(
+      `DELETE FROM booking_shares bs USING hotels h
+       WHERE bs.hotel_id = h.id AND h.trip_id = $1 AND bs.user_id = $2 AND bs.expense_id IS NULL`,
+      [req.params.tripId, req.params.userId]
+    );
+    await client.query(
+      `DELETE FROM booking_shares bs USING flights f
+       WHERE bs.flight_id = f.id AND f.trip_id = $1 AND bs.user_id = $2 AND bs.expense_id IS NULL`,
+      [req.params.tripId, req.params.userId]
+    );
+
+    await client.query(
+      `DELETE FROM booking_shares bs USING hotels h
+       WHERE bs.hotel_id = h.id AND h.trip_id = $1
+         AND bs.hotel_id IN (
+           SELECT hotel_id FROM booking_shares WHERE hotel_id IS NOT NULL GROUP BY hotel_id HAVING count(*) <= 1
+         )`,
+      [req.params.tripId]
+    );
+    await client.query(
+      `DELETE FROM booking_shares bs USING flights f
+       WHERE bs.flight_id = f.id AND f.trip_id = $1
+         AND bs.flight_id IN (
+           SELECT flight_id FROM booking_shares WHERE flight_id IS NOT NULL GROUP BY flight_id HAVING count(*) <= 1
+         )`,
+      [req.params.tripId]
+    );
+
+    await client.query('DELETE FROM trip_collaborators WHERE trip_id = $1 AND user_id = $2', [
       req.params.tripId,
       req.params.userId,
     ]);
+
+    await client.query('COMMIT');
     res.status(204).send();
   } catch (err) {
+    await client.query('ROLLBACK');
     next(err);
+  } finally {
+    client.release();
   }
 });
 

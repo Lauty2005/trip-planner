@@ -139,6 +139,26 @@ function todayISO(): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
+// `hotels.price` es el precio POR NOCHE (2026-07-06, a pedido de
+// Lautaro — antes el form lo pedía como "precio total" pero la tarjeta
+// del dossier igual le agregaba "/ noche", una inconsistencia que hacía
+// que el reparto y "marcar pagado" cobraran de menos). nightsBetween usa
+// el mismo cálculo que daysCount más abajo para el trip completo; mínimo
+// 1 noche para no romper la cuenta si faltan fechas o checkOut <= checkIn.
+function nightsBetween(checkInDate?: string, checkOutDate?: string): number {
+  if (!checkInDate || !checkOutDate) return 1;
+  const nights = Math.round((new Date(checkOutDate).getTime() - new Date(checkInDate).getTime()) / 86_400_000);
+  return Math.max(1, nights);
+}
+
+// Total de la estadía (precio por noche × noches) — lo que efectivamente
+// hay que repartir/cobrar, a diferencia del precio por noche que se carga
+// en el form de Reservas. `undefined` si el hotel no tiene precio cargado.
+function hotelTotalPrice(hotel: Pick<SavedHotel, 'price' | 'checkInDate' | 'checkOutDate'>): number | undefined {
+  if (hotel.price == null) return undefined;
+  return Math.round(hotel.price * nightsBetween(hotel.checkInDate, hotel.checkOutDate) * 100) / 100;
+}
+
 // Hotel/vuelo con precio cargado que todavía no se pasó a un gasto real
 // (tab Gastos, sección "Pendientes de pago") — ver pendingPayments más
 // abajo y source_hotel_id/source_flight_id en expenses. Si `shares` no está
@@ -637,10 +657,13 @@ export default function TripDetailScreen() {
     setEditingSharesFor({ type, id: item.id });
     setSharesError(null);
     const draft: Record<string, string> = {};
+    // Para hoteles el reparto es sobre el TOTAL de la estadía (precio por
+    // noche × noches), no sobre el precio por noche cargado en el form.
+    const totalPrice = type === 'hotel' ? hotelTotalPrice(item as SavedHotel) : item.price;
     if (item.shares.length > 0) {
       for (const s of item.shares) draft[s.userId] = String(s.amount);
-    } else if (item.price != null && participants.length > 0) {
-      const each = Math.round((item.price / participants.length) * 100) / 100;
+    } else if (totalPrice != null && participants.length > 0) {
+      const each = Math.round((totalPrice / participants.length) * 100) / 100;
       for (const p of participants) draft[p.userId] = String(each);
     }
     setShareDrafts(draft);
@@ -650,6 +673,31 @@ export default function TripDetailScreen() {
     setEditingSharesFor(null);
     setShareDrafts({});
     setSharesError(null);
+  }
+
+  // "Recalcular en partes iguales" dentro del editor (2026-07-06, a pedido
+  // de Lautaro): a diferencia del default de openShareEditor (que solo
+  // arranca en partes iguales cuando TODAVÍA no hay reparto armado), esto
+  // pisa los montos ya cargados en el draft — pensado para arreglar un
+  // reparto que quedó con un monto viejo (ej. calculado antes de que el
+  // precio del hotel pasara a ser "por noche" con total automático) sin
+  // tener que tipear cada campo a mano. Reparte lo que falta cubrir (total
+  // menos lo ya pagado) entre quienes todavía no pagaron su parte — nunca
+  // toca las partes con `paid: true`.
+  function recalculateEqualSplit(type: 'hotel' | 'flight', item: SavedHotel | SavedFlight) {
+    const totalPrice = type === 'hotel' ? hotelTotalPrice(item as SavedHotel) : item.price;
+    if (totalPrice == null) return;
+    const paidUserIds = new Set(item.shares.filter((s) => s.paid).map((s) => s.userId));
+    const paidTotal = item.shares.filter((s) => s.paid).reduce((sum, s) => sum + s.amount, 0);
+    const unpaidParticipants = participants.filter((p) => !paidUserIds.has(p.userId));
+    if (unpaidParticipants.length === 0) return;
+    const remaining = Math.max(0, totalPrice - paidTotal);
+    const each = Math.round((remaining / unpaidParticipants.length) * 100) / 100;
+    setShareDrafts((prev) => {
+      const next = { ...prev };
+      for (const p of unpaidParticipants) next[p.userId] = String(each);
+      return next;
+    });
   }
 
   function setShareDraftAmount(userId: string, value: string) {
@@ -763,7 +811,9 @@ export default function TripDetailScreen() {
         id: h.id,
         type: 'hotel' as const,
         title: h.name,
-        price: h.price!,
+        // Total de la estadía (precio por noche × noches), no el precio
+        // por noche crudo — ver hotelTotalPrice más arriba.
+        price: hotelTotalPrice(h)!,
         currency: h.currency ?? trip.currency,
         budgetCategoryId: h.budgetCategoryId,
         shares: h.shares,
@@ -888,6 +938,9 @@ export default function TripDetailScreen() {
             );
           })}
           <Text style={styles.shareEditorHint}>Dejar en 0 o vacío = esa persona no viaja en esta reserva.</Text>
+          <Pressable onPress={() => recalculateEqualSplit(type, item)}>
+            <Text style={styles.link}>↻ Recalcular en partes iguales</Text>
+          </Pressable>
           {sharesError ? <Text style={styles.error}>{sharesError}</Text> : null}
           <View style={styles.shareEditorActions}>
             <Pressable onPress={cancelShareEditor}>
@@ -1573,9 +1626,15 @@ export default function TripDetailScreen() {
                       </Text>
                     ) : null}
                     {hotel.price != null ? (
-                      <Text style={styles.savedPrice}>
-                        {hotel.price} <Text style={styles.savedPriceUnit}>{hotel.currency} / noche</Text>
-                      </Text>
+                      <>
+                        <Text style={styles.savedPrice}>
+                          {money(hotelTotalPrice(hotel)!)} <Text style={styles.savedPriceUnit}>{hotel.currency} total</Text>
+                        </Text>
+                        <Text style={styles.savedPriceDetail}>
+                          {money(hotel.price)} {hotel.currency}/noche · {nightsBetween(hotel.checkInDate, hotel.checkOutDate)}{' '}
+                          {nightsBetween(hotel.checkInDate, hotel.checkOutDate) === 1 ? 'noche' : 'noches'}
+                        </Text>
+                      </>
                     ) : null}
                     {renderShareSection('hotel', hotel)}
                   </View>
@@ -2129,6 +2188,7 @@ const styles = StyleSheet.create({
   savedMeta: { fontFamily: fonts.mono, fontSize: 12.5, color: colors.inkSoft },
   savedPrice: { fontFamily: fonts.displaySemibold, fontSize: 18, fontWeight: '700', color: colors.ink, marginTop: 2 },
   savedPriceUnit: { fontSize: 12.5, fontWeight: '400', color: colors.muted },
+  savedPriceDetail: { fontFamily: fonts.mono, fontSize: 11.5, color: colors.muted, marginTop: 1 },
 
   flightCard: {
     backgroundColor: colors.surface,

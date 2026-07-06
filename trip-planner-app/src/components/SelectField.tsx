@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { View, Text, Pressable, Modal, TextInput, ScrollView, StyleSheet } from 'react-native';
+import { View, Text, Pressable, Modal, TextInput, ScrollView, StyleSheet, ActivityIndicator } from 'react-native';
 import { colors, spacing, radius, cardShadow, fonts, tracking } from '@/theme';
 
 // Selector de una opción entre una lista fija (Moneda, Aerolínea en el form
@@ -8,6 +8,14 @@ import { colors, spacing, radius, cardShadow, fonts, tracking } from '@/theme';
 // abre un modal con la lista completa; con `searchable` suma un buscador
 // arriba para listas largas (ej. aerolíneas). Ver SelectField.web.tsx para
 // el equivalente en web (un <select> nativo del navegador).
+//
+// `creatable` (2026-07-06, a pedido de Lautaro — categoría de presupuesto
+// del form de Reservas): si lo que se tipeó no matchea ninguna opción
+// existente, aparece una fila "+ Crear "texto"" arriba de la lista que
+// llama a `onCreateOption` (async — hace el POST real) y, si devuelve una
+// opción, la selecciona sola y cierra el modal. Fuerza el buscador visible
+// aunque no se pase `searchable`, porque sin poder tipear no hay forma de
+// crear nada nuevo.
 
 export interface SelectOption {
   value: string;
@@ -22,6 +30,8 @@ export function SelectField({
   onChange,
   options,
   searchable = false,
+  creatable = false,
+  onCreateOption,
 }: {
   glyph: string;
   label: string;
@@ -30,9 +40,16 @@ export function SelectField({
   onChange: (value: string) => void;
   options: SelectOption[];
   searchable?: boolean;
+  creatable?: boolean;
+  // Crea la opción nueva del lado del padre (ej. POST /budget-categories)
+  // y devuelve {value, label} lista para seleccionar — `null`/throw si
+  // falló, y SelectField se lo muestra al usuario sin cerrar el modal.
+  onCreateOption?: (query: string) => Promise<SelectOption | null>;
 }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState('');
+  const [creating, setCreating] = useState(false);
+  const [createError, setCreateError] = useState<string | null>(null);
 
   const selected = options.find((o) => o.value === value);
   const filtered = useMemo(() => {
@@ -41,14 +58,38 @@ export function SelectField({
     return options.filter((o) => o.label.toLowerCase().includes(q));
   }, [options, query]);
 
+  const trimmedQuery = query.trim();
+  const hasExactMatch = options.some((o) => o.label.toLowerCase() === trimmedQuery.toLowerCase());
+  const showCreateRow = creatable && trimmedQuery.length > 0 && !hasExactMatch;
+
   function handleOpen() {
     setQuery('');
+    setCreateError(null);
     setOpen(true);
   }
 
   function handleSelect(opt: SelectOption) {
     onChange(opt.value);
     setOpen(false);
+  }
+
+  async function handleCreate() {
+    if (!onCreateOption || !trimmedQuery || creating) return;
+    setCreating(true);
+    setCreateError(null);
+    try {
+      const opt = await onCreateOption(trimmedQuery);
+      if (opt) {
+        onChange(opt.value);
+        setOpen(false);
+      } else {
+        setCreateError('No se pudo crear.');
+      }
+    } catch {
+      setCreateError('No se pudo crear.');
+    } finally {
+      setCreating(false);
+    }
   }
 
   return (
@@ -67,19 +108,34 @@ export function SelectField({
           <Pressable style={styles.card} onPress={() => {}}>
             <Text style={styles.cardTitle}>{label}</Text>
 
-            {searchable ? (
+            {searchable || creatable ? (
               <TextInput
                 style={styles.search}
-                placeholder="Buscar..."
+                placeholder={creatable ? 'Buscar o escribir una nueva...' : 'Buscar...'}
                 placeholderTextColor={colors.muted}
                 value={query}
-                onChangeText={setQuery}
+                onChangeText={(v) => {
+                  setQuery(v);
+                  setCreateError(null);
+                }}
                 autoCorrect={false}
               />
             ) : null}
 
             <ScrollView style={styles.list} keyboardShouldPersistTaps="handled">
-              {filtered.length === 0 ? (
+              {showCreateRow ? (
+                <Pressable style={[styles.row, styles.createRow]} onPress={handleCreate} disabled={creating}>
+                  {creating ? (
+                    <ActivityIndicator size="small" color={colors.stamp} />
+                  ) : (
+                    <Text style={[styles.rowText, styles.createRowText]} numberOfLines={1}>
+                      {`+ Crear "${trimmedQuery}"`}
+                    </Text>
+                  )}
+                </Pressable>
+              ) : null}
+
+              {filtered.length === 0 && !showCreateRow ? (
                 <Text style={styles.empty}>Sin resultados.</Text>
               ) : (
                 filtered.map((opt) => (
@@ -93,6 +149,8 @@ export function SelectField({
                 ))
               )}
             </ScrollView>
+
+            {createError ? <Text style={styles.createError}>{createError}</Text> : null}
 
             <Pressable style={styles.closeButton} onPress={() => setOpen(false)}>
               <Text style={styles.closeButtonText}>Cerrar</Text>
@@ -163,6 +221,9 @@ const styles = StyleSheet.create({
   rowSelected: { backgroundColor: colors.primaryFixed },
   rowText: { fontSize: 15, color: colors.ink },
   rowTextSelected: { fontWeight: '700' },
+  createRow: { borderWidth: 1, borderColor: colors.stamp, borderStyle: 'dashed', marginBottom: 6 },
+  createRowText: { color: colors.stamp, fontWeight: '600' },
+  createError: { color: colors.stamp, fontSize: 12.5, marginTop: -4 },
   closeButton: { alignItems: 'center', paddingVertical: 8 },
   closeButtonText: { color: colors.inkSoft, fontWeight: '600' },
 });

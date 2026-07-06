@@ -14,7 +14,8 @@ import {
   type SavedFlight,
   type SavedHotel,
 } from '@/api/trips';
-import { getBudgetCategoryOptions } from '@/api/budget';
+import { getBudgetCategoryOptions, createBudgetCategory } from '@/api/budget';
+import type { SelectOption } from '@/components/SelectField';
 import { useSelectedTripStore } from '@/store/selectedTrip';
 import { useEditFlightStore } from '@/store/editFlight';
 import { useEditHotelStore } from '@/store/editHotel';
@@ -170,6 +171,28 @@ export default function ExploreScreen() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [savedLabel, setSavedLabel] = useState<string | null>(null);
+
+  // Categoría "Hotel"/"Vuelo" por defecto (2026-07-06, a pedido de
+  // Lautaro): en vez de dejar el selector en "Sin categoría" hasta que el
+  // usuario elija algo a mano, en cuanto ya existe una categoría llamada
+  // "Hotel" (u "Vuelo") se preselecciona sola acá — sin pisar nunca un
+  // valor ya elegido (a mano o precargado al editar, ver loadHotelForEdit/
+  // loadFlightForEdit). Si esa categoría todavía no existe, handleSaveHotel/
+  // handleSaveFlight la crean recién al guardar (más abajo) — no la creamos
+  // solo por abrir el form.
+  useEffect(() => {
+    if (hotelBudgetCategoryId) return;
+    const existing = budgetCategoryOptions.find((o) => o.label.toLowerCase() === 'hotel');
+    if (existing) setHotelBudgetCategoryId(existing.value);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [budgetCategoryOptions]);
+
+  useEffect(() => {
+    if (flightBudgetCategoryId) return;
+    const existing = budgetCategoryOptions.find((o) => o.label.toLowerCase() === 'vuelo');
+    if (existing) setFlightBudgetCategoryId(existing.value);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [budgetCategoryOptions]);
 
   // Minutos de espera de la escala (0 si "Con escala" está desmarcado) —
   // se suman a la duración estimada tanto acá como en el botón "Calcular
@@ -371,6 +394,47 @@ export default function ExploreScreen() {
     }
   }
 
+  // Precio a usar como "planificado" si hay que crear la categoría del
+  // hotel — el TOTAL de la estadía (precio por noche × noches, mismo
+  // cálculo que hotelTotalPrice en el dossier), no el precio por noche.
+  function hotelPlannedAmount(): number {
+    const nights =
+      checkIn && checkOut
+        ? Math.max(1, Math.round((new Date(checkOut).getTime() - new Date(checkIn).getTime()) / 86_400_000))
+        : 1;
+    return hotelPrice != null ? Math.round(hotelPrice * nights * 100) / 100 : 0;
+  }
+
+  // Busca una categoría de presupuesto existente por nombre (case-
+  // insensitive) antes de crearla — la usan tanto el selector manual de
+  // categoría (onCreateOption, cuando el usuario tipea un nombre nuevo)
+  // como el default automático "Hotel"/"Vuelo" en handleSaveHotel/
+  // handleSaveFlight (2026-07-06, a pedido de Lautaro), así ambos caminos
+  // reusan la misma categoría en vez de duplicarla. Devuelve `null` si
+  // falla el POST (sin cortar el guardado del hotel/vuelo por eso).
+  async function findOrCreateCategory(name: string, plannedAmount: number): Promise<SelectOption | null> {
+    if (!selectedTrip) return null;
+    const trimmed = name.trim();
+    const existing = budgetCategoryOptions.find((o) => o.label.toLowerCase() === trimmed.toLowerCase());
+    if (existing) return existing;
+    try {
+      const cat = await createBudgetCategory(selectedTrip.id, { name: trimmed, plannedAmount });
+      const opt: SelectOption = { value: cat.id, label: cat.name };
+      setBudgetCategoryOptions((prev) => [...prev, opt]);
+      return opt;
+    } catch {
+      return null;
+    }
+  }
+
+  async function handleCreateHotelCategory(name: string): Promise<SelectOption | null> {
+    return findOrCreateCategory(name, hotelPlannedAmount());
+  }
+
+  async function handleCreateFlightCategory(name: string): Promise<SelectOption | null> {
+    return findOrCreateCategory(name, flightPrice ?? 0);
+  }
+
   async function handleSaveHotel() {
     if (!selectedTrip) return;
     if (!hotelName.trim() || !checkIn || !checkOut) {
@@ -384,6 +448,9 @@ export default function ExploreScreen() {
     setError(null);
     setSaving(true);
     try {
+      // Sin categoría elegida a mano: cae en "Hotel" por default (se crea
+      // sola la primera vez, con el total de la estadía como planificado).
+      const budgetCategoryId = hotelBudgetCategoryId || (await findOrCreateCategory('Hotel', hotelPlannedAmount()))?.value;
       const payload: HotelFormPayload = {
         name: hotelName.trim(),
         address: hotelAddress.trim() || undefined,
@@ -392,7 +459,7 @@ export default function ExploreScreen() {
         price: hotelPrice,
         currency: hotelCurrency || selectedTrip.currency,
         notes: hotelNotes.trim() || undefined,
-        budgetCategoryId: hotelBudgetCategoryId || undefined,
+        budgetCategoryId,
       };
       if (editingHotelId) {
         await updateHotel(editingHotelId, payload);
@@ -451,6 +518,9 @@ export default function ExploreScreen() {
       // (no `undefined`) para que el PATCH limpie esas columnas en vez de
       // dejar pisada la escala vieja (ver comentario en FlightFormPayload).
       const clearingLayover = Boolean(editingFlightId) && !hasLayover;
+      // Sin categoría elegida a mano: cae en "Vuelo" por default (se crea
+      // sola la primera vez, con el precio cargado como planificado).
+      const budgetCategoryId = flightBudgetCategoryId || (await findOrCreateCategory('Vuelo', flightPrice ?? 0))?.value;
       const payload: FlightFormPayload = {
         airline: airline.trim() || undefined,
         flightNumber: flightNumber.trim() || undefined,
@@ -470,7 +540,7 @@ export default function ExploreScreen() {
           : clearingLayover
             ? null
             : undefined,
-        budgetCategoryId: flightBudgetCategoryId || undefined,
+        budgetCategoryId,
       };
 
       if (editingFlightId) {
@@ -570,7 +640,7 @@ export default function ExploreScreen() {
             </View>
             <View style={styles.fieldRow}>
               <View style={styles.fieldRowItem}>
-                <PriceField glyph="💲" label="Precio total (opcional)" value={hotelPrice} onChange={setHotelPrice} />
+                <PriceField glyph="💲" label="Precio por noche (opcional)" value={hotelPrice} onChange={setHotelPrice} />
               </View>
               <View style={styles.fieldRowItem}>
                 <SelectField
@@ -593,6 +663,8 @@ export default function ExploreScreen() {
               value={hotelBudgetCategoryId}
               onChange={setHotelBudgetCategoryId}
               options={budgetCategoryOptions}
+              creatable
+              onCreateOption={handleCreateHotelCategory}
             />
             <Field glyph="📝" label="Notas (opcional)" placeholder="Ej: reserva a nombre de..." value={hotelNotes} onChangeText={setHotelNotes} />
 
@@ -795,6 +867,8 @@ export default function ExploreScreen() {
               value={flightBudgetCategoryId}
               onChange={setFlightBudgetCategoryId}
               options={budgetCategoryOptions}
+              creatable
+              onCreateOption={handleCreateFlightCategory}
             />
             <Field glyph="📝" label="Notas (opcional)" placeholder="Ej: check-in online pendiente" value={flightNotes} onChangeText={setFlightNotes} />
 

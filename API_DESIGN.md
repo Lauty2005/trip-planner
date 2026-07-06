@@ -30,7 +30,7 @@ Regla de autorización transversal: toda ruta bajo `/trips/:tripId/*` valida que
 |---|---|---|
 | GET | `/trips/:tripId/collaborators` | Lista colaboradores |
 | POST | `/trips/:tripId/collaborators` | Invita por email (role: editor/viewer) |
-| DELETE | `/trips/:tripId/collaborators/:userId` | Quita colaborador |
+| DELETE | `/trips/:tripId/collaborators/:userId` | Quita colaborador — de paso borra sus partes SIN pagar en el reparto (`booking_shares`) de hoteles/vuelos de este viaje, y si eso deja un reparto en 0/1 persona lo borra entero (vuelve al flujo de "un solo pagador"). No toca partes ya pagadas ni `expense_splits` de gastos ya cargados. |
 
 ## Itinerario
 
