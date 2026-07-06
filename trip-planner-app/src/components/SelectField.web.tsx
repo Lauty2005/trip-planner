@@ -1,15 +1,20 @@
 import { useEffect, useId, useState } from 'react';
 import { View, Text, Pressable, StyleSheet, ActivityIndicator } from 'react-native';
-import { colors, radius, fonts, tracking } from '@/theme';
+import { colors, spacing, radius, fonts, tracking } from '@/theme';
 
-// Equivalente web de SelectField.tsx: en vez del modal a medida, un
-// <select> nativo del navegador (menú desplegable real del sistema
-// operativo/navegador — más acorde a como se usa un selector en web).
-// 'select'/'option'/etc as any porque los tipos de @types/react-native no
-// declaran JSX.IntrinsicElements para etiquetas HTML crudas; mismo
-// escape hatch que ya usan TripMapPreview.web.tsx/map.web.tsx (ahí con
-// document.createElement en vez de JSX). Este archivo solo se bundlea
-// para web (sufijo .web.tsx), así que en nativo nunca se evalúa.
+// Equivalente web de SelectField.tsx: sigue usando el <select> nativo del
+// navegador (menú desplegable real del sistema — la razón original para
+// tener este archivo separado sigue siendo válida, ver comentario de
+// abajo), pero fija el alto en el WRAPPER en vez de en el <select> —
+// antes el padding vertical vivía en `selectStyle` (adentro del <select>),
+// así que el alto de la caja lo terminaba decidiendo el motor de
+// renderizado nativo del <select> del navegador, que mide distinto que un
+// <input>/<Text> aunque compartan el mismo padding. Eso hacía que "Moneda"
+// quedara más alto que "Precio por noche" en la misma fila y su borde se
+// metiera en la fila de abajo (bug reportado 2026-07-06). Ahora fieldBox
+// tiene height:spacing.fieldHeight + boxSizing:'border-box' (igual que
+// Field/PriceField/DatePickerField/TimePickerField) y el <select> ocupa
+// 100% de esa altura ya fija — mismo criterio en los 8 tipos de campo.
 const HtmlSelect = 'select' as any;
 const HtmlOption = 'option' as any;
 const HtmlInput = 'input' as any;
@@ -129,11 +134,7 @@ export function SelectField({
       <Text style={styles.fieldLabel}>{label.toUpperCase()}</Text>
       <View style={styles.fieldBox}>
         <Text style={styles.fieldGlyph}>{glyph}</Text>
-        <HtmlSelect
-          value={value}
-          onChange={(e: any) => onChange(e.target.value)}
-          style={selectStyle}
-        >
+        <HtmlSelect value={value} onChange={(e: any) => onChange(e.target.value)} style={selectStyle}>
           <HtmlOption value="" disabled>
             {placeholder}
           </HtmlOption>
@@ -148,15 +149,18 @@ export function SelectField({
   );
 }
 
+// Antes: paddingTop/paddingBottom:12 acá (adentro del <select>) — eso era
+// el bug. Ahora el <select> solo ocupa el 100% del alto que ya fijó
+// fieldBox; sin padding vertical propio, sin border, sin altura propia.
 const selectStyle: Record<string, string | number> = {
   flex: 1,
+  height: '100%',
+  boxSizing: 'border-box',
   border: 'none',
   outline: 'none',
   background: 'transparent',
   fontSize: 16,
   color: colors.ink,
-  paddingTop: 12,
-  paddingBottom: 12,
   width: '100%',
   cursor: 'pointer',
 };
@@ -171,6 +175,8 @@ const styles = StyleSheet.create({
     marginLeft: 2,
   },
   fieldBox: {
+    height: spacing.fieldHeight,
+    boxSizing: 'border-box' as any,
     flexDirection: 'row',
     alignItems: 'center',
     backgroundColor: colors.surface,

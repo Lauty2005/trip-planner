@@ -78,6 +78,13 @@ export const spacing = {
   containerPadding: 20,
   stackLg: 24,
   sectionGap: 40,
+  // Alto fijo de fieldBox en Field/PriceField/SelectField/DatePickerField/
+  // TimePickerField/AmountField/DateRangeField/DateTimeField. Todas estas
+  // cajas deben usar boxSizing:'border-box' + height:fieldHeight (no
+  // paddingVertical para determinar el alto) — así el alto nunca depende
+  // de si adentro hay un <TextInput> o un <select>/<input> nativo, que en
+  // react-native-web miden distinto aunque tengan el mismo padding.
+  fieldHeight: 48,
 } as const;
 
 // El boceto es mucho menos "bubbly" que el Material anterior (--r:14px

@@ -19,11 +19,10 @@ import type { SelectOption } from '@/components/SelectField';
 import { useSelectedTripStore } from '@/store/selectedTrip';
 import { useEditFlightStore } from '@/store/editFlight';
 import { useEditHotelStore } from '@/store/editHotel';
-import { DatePickerField } from '@/components/DatePickerField';
 import { SelectField } from '@/components/SelectField';
-import { TimePickerField } from '@/components/TimePickerField';
-import { PriceField } from '@/components/PriceField';
-import { CURRENCIES } from '@/data/currencies';
+import { AmountField } from '@/components/AmountField';
+import { DateRangeField } from '@/components/DateRangeField';
+import { DateTimeField } from '@/components/DateTimeField';
 import { AIRLINES } from '@/data/airlines';
 import { colors, spacing, radius, cardShadow, fonts, tracking, layout } from '@/theme';
 import { AppHeader } from '@/components/AppHeader';
@@ -623,36 +622,20 @@ export default function ExploreScreen() {
             ) : null}
             <Field glyph="🏨" label="Nombre del hotel" placeholder="Ej: Hotel Central" value={hotelName} onChangeText={setHotelName} />
             <Field glyph="📍" label="Dirección (opcional)" placeholder="Calle y número, ciudad" value={hotelAddress} onChangeText={setHotelAddress} />
-            <View style={styles.fieldRow}>
-              <View style={styles.fieldRowItem}>
-                <DatePickerField glyph="🗓️" label="Check-in" placeholder="Elegí una fecha" value={checkIn} onChange={setCheckIn} minDate={todayISO()} />
-              </View>
-              <View style={styles.fieldRowItem}>
-                <DatePickerField
-                  glyph="🗓️"
-                  label="Check-out"
-                  placeholder="Elegí una fecha"
-                  value={checkOut}
-                  onChange={setCheckOut}
-                  minDate={checkIn || todayISO()}
-                />
-              </View>
-            </View>
-            <View style={styles.fieldRow}>
-              <View style={styles.fieldRowItem}>
-                <PriceField glyph="💲" label="Precio por noche (opcional)" value={hotelPrice} onChange={setHotelPrice} />
-              </View>
-              <View style={styles.fieldRowItem}>
-                <SelectField
-                  glyph="💱"
-                  label="Moneda"
-                  placeholder={selectedTrip?.currency ?? 'Elegí una moneda'}
-                  value={hotelCurrency}
-                  onChange={setHotelCurrency}
-                  options={CURRENCIES}
-                />
-              </View>
-            </View>
+            <DateRangeField
+              checkIn={checkIn}
+              checkOut={checkOut}
+              onChangeCheckIn={setCheckIn}
+              onChangeCheckOut={setCheckOut}
+              minDate={todayISO()}
+            />
+            <AmountField
+              label="Precio por noche (opcional)"
+              price={hotelPrice}
+              currency={hotelCurrency || selectedTrip?.currency || ''}
+              onPriceChange={setHotelPrice}
+              onCurrencyChange={setHotelCurrency}
+            />
             {/* Categoría de presupuesto: no suma nada a "gastado" por sí
                 sola — solo queda guardada para cuando marqués este hotel
                 como pagado desde la tab Gastos. */}
@@ -719,14 +702,15 @@ export default function ExploreScreen() {
               </View>
             </View>
 
-            <View style={styles.fieldRow}>
-              <View style={styles.fieldRowItem}>
-                <DatePickerField glyph="🗓️" label="Fecha de salida" placeholder="Elegí una fecha" value={departDate} onChange={setDepartDate} minDate={todayISO()} />
-              </View>
-              <View style={styles.fieldRowItem}>
-                <TimePickerField glyph="🕐" label="Hora de salida" value={departTime} onChange={setDepartTime} />
-              </View>
-            </View>
+            <DateTimeField
+              label="Salida"
+              glyph="🛫"
+              date={departDate}
+              time={departTime}
+              onChangeDate={setDepartDate}
+              onChangeTime={setDepartTime}
+              minDate={todayISO()}
+            />
 
             {/* Escala arriba de la llegada: el tiempo de espera acá cargado
                 se suma a la estimación automática de más abajo. */}
@@ -774,21 +758,15 @@ export default function ExploreScreen() {
 
             {showArrivalFields ? (
               <>
-                <View style={styles.fieldRow}>
-                  <View style={styles.fieldRowItem}>
-                    <DatePickerField
-                      glyph="🗓️"
-                      label="Fecha de llegada"
-                      placeholder="Elegí una fecha"
-                      value={arriveDate}
-                      onChange={setArriveDate}
-                      minDate={departDate || todayISO()}
-                    />
-                  </View>
-                  <View style={styles.fieldRowItem}>
-                    <TimePickerField glyph="🕐" label="Hora de llegada" value={arriveTime} onChange={setArriveTime} />
-                  </View>
-                </View>
+                <DateTimeField
+                  label="Llegada"
+                  glyph="🛬"
+                  date={arriveDate}
+                  time={arriveTime}
+                  onChangeDate={setArriveDate}
+                  onChangeTime={setArriveTime}
+                  minDate={departDate || todayISO()}
+                />
                 <View style={styles.estimateActions}>
                   <Pressable onPress={handleEstimateArrivalClick} disabled={estimating}>
                     <Text style={styles.estimateLink}>{estimating ? 'Calculando...' : '✨ Calcular automáticamente'}</Text>
@@ -842,21 +820,13 @@ export default function ExploreScreen() {
               </View>
             </View>
 
-            <View style={styles.fieldRow}>
-              <View style={styles.fieldRowItem}>
-                <PriceField glyph="💲" label="Precio (opcional)" value={flightPrice} onChange={setFlightPrice} />
-              </View>
-              <View style={styles.fieldRowItem}>
-                <SelectField
-                  glyph="💱"
-                  label="Moneda"
-                  placeholder={selectedTrip?.currency ?? 'Elegí una moneda'}
-                  value={flightCurrency}
-                  onChange={setFlightCurrency}
-                  options={CURRENCIES}
-                />
-              </View>
-            </View>
+            <AmountField
+              label="Precio (opcional)"
+              price={flightPrice}
+              currency={flightCurrency || selectedTrip?.currency || ''}
+              onPriceChange={setFlightPrice}
+              onCurrencyChange={setFlightCurrency}
+            />
             {/* Categoría de presupuesto: no suma nada a "gastado" por sí
                 sola — solo queda guardada para cuando marqués este vuelo
                 como pagado desde la tab Gastos. */}
