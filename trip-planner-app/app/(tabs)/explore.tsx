@@ -972,6 +972,8 @@ const styles = StyleSheet.create({
   // (cada uno define su propio fieldLabel).
   fieldLabel: { fontFamily: fonts.mono, fontSize: 10.5, letterSpacing: tracking.wide, color: colors.muted, marginBottom: 4, marginLeft: 2, minHeight: 28 },
   fieldBox: {
+    height: spacing.fieldHeight,
+    boxSizing: 'border-box' as any,
     flexDirection: 'row',
     alignItems: 'center',
     backgroundColor: colors.surface,
@@ -979,18 +981,15 @@ const styles = StyleSheet.create({
     borderColor: colors.line,
     borderRadius: radius.lg,
     paddingHorizontal: 12,
-    // paddingVertical acá (en vez de en fieldInput) para que la altura de
-    // la caja la determine siempre el mismo padding sin importar si adentro
-    // hay un <TextInput> (Field/PriceField) o un <Text> dentro de un
-    // Pressable (SelectField/DatePickerField/TimePickerField) — en web,
-    // react-native-web renderiza el TextInput como un <input> con su
-    // propio alto intrínseco, que no coincide con el de un <span>/<div> de
-    // Text aunque ambos tengan el mismo paddingVertical puesto en el hijo.
-    // Poniendo el padding en la caja (que sí mide flexbox real) los 5
-    // componentes de campo quedan con la MISMA altura de fieldBox siempre,
-    // así el fieldRow no desalinea un campo respecto al de al lado (bug
-    // visto en la fila Aerolínea/N° de vuelo y en Precio/Moneda).
-    paddingVertical: 12,
+    // Antes: paddingVertical:12 acá determinaba el alto — pero un
+    // <TextInput> (Field) y un <Text> dentro de un Pressable (SelectField/
+    // AmountField/DateRangeField/DateTimeField) miden distinto en
+    // react-native-web aunque compartan el mismo padding (el <input> tiene
+    // su propio alto intrínseco). Eso desalineaba "Aerolínea" (SelectField,
+    // ya con height:fieldHeight fijo) contra "N° de vuelo" (este Field,
+    // todavía con paddingVertical) — reportado 2026-07-06. Ahora los 8
+    // tipos de campo comparten el mismo height:spacing.fieldHeight +
+    // boxSizing:'border-box', así ninguna fieldRow los desalinea.
   },
   fieldGlyph: { fontSize: 16, marginRight: 8 },
   fieldInput: { flex: 1, fontSize: 16, color: colors.ink },

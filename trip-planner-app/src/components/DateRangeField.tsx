@@ -170,6 +170,8 @@ export function DateRangeField({
 }
 
 const styles = StyleSheet.create({
+  // minHeight: mismo fix de PriceField/DatePickerField/SelectField — ver
+  // comentario en SelectField.web.tsx.
   fieldLabel: {
     fontFamily: fonts.mono,
     fontSize: 10.5,
@@ -178,6 +180,7 @@ const styles = StyleSheet.create({
     color: colors.muted,
     marginBottom: 4,
     marginLeft: 4,
+    minHeight: 28,
   },
   fieldBox: {
     height: spacing.fieldHeight,

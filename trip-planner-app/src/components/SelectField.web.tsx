@@ -166,6 +166,13 @@ const selectStyle: Record<string, string | number> = {
 };
 
 const styles = StyleSheet.create({
+  // minHeight: reserva 2 líneas de alto aunque el label entre en una sola
+  // (mismo fix que PriceField/DatePickerField/SelectField nativo) — sin
+  // esto, en una fieldRow donde el label de al lado se parte en 2 líneas,
+  // este fieldBox arranca más arriba que el de al lado aunque ambos tengan
+  // la misma altura fija (bug reportado 2026-07-06, fila Aerolínea/N° de
+  // vuelo: el patch de altura de fieldBox no alcanza si los labels
+  // arrancan en distinta Y).
   fieldLabel: {
     fontFamily: fonts.mono,
     fontSize: 10.5,
@@ -173,6 +180,7 @@ const styles = StyleSheet.create({
     color: colors.muted,
     marginBottom: 4,
     marginLeft: 2,
+    minHeight: 28,
   },
   fieldBox: {
     height: spacing.fieldHeight,
